@@ -1,20 +1,24 @@
+# P1 — Data Structures and Algorithms for Triangle Meshes
 
-## Description
+This project explores algorithms for processing triangular meshes: mesh statistics, degenerated triangle checker, distance computation, mesh topology and automatic UV parameterization.
 
-This is the documentation for the code given as initial helpers for the
-FMFIG triangle meshes homework. This documentation is not intended to be
-read in a determinate order, but used as help and fast guide of available
-[classes](hierarchy.html) and [members](functions.html).
+## Vertex Distance to the Nearest Boundary
 
-This library implement the storage and some usual operations for generic triangle meshes.
+Computes the distance from each vertex to the nearest mesh boundary. The results are visualized on 3D models using color mapping.
 
-It is [C++ a header-only library][1]. You do not need to precompile or link to anything,
-just include headers (e.g. `#include <SimpleMesh.hpp>`) and run.
-Storage is based in STL [vectors][2] as containers of coordinates and indexes of triangles.
+- **Performance:** Processed a mesh with 990K vertices (Nefertiti) in 1.77 seconds.
+- **Topology:** Supports manifold meshes with multiple boundary loops (Angel), including meshes with holes.
 
-Some exercises use the [Eigen](http://eigen.tuxfamily.org) library for easy matrix
-storage and operation. Eigen provides a good support to sparse matrix operations
-(as product or solving) that are automatically parallelized in modern computers.
+| Nefertiti | Angel |
+|:---:|:---:|
+| ![Nefertiti](../images/P1Nefertiti.png "Nefertiti") | ![Angel](../images/P1Angel.png "Angel") |
 
-[1]: https://stackoverflow.com/questions/12671383/benefits-of-header-only-libraries#12673877
-[2]: http://www.cplusplus.com/reference/vector/vector/
+## Automatic UV Mapping
+
+Implements automatic UV parameterization for triangular meshes with **Euler characteristic \(&chi; = 1\)**, corresponding to a topological disk under the usual connected, orientable manifold assumptions.
+
+The method uses **barycentric mapping** (from *Polygon Mesh Processing 2010*) to compute 2D texture coordinates for mesh vertices, mapping the surface to a planar domain suitable for texture mapping.
+
+| Plank, 45k vertices in 0.286 seconds |
+|:---:|
+| ![Automatic UV Mapping](../images/P1UVMap.png "Automatic UV Mapping") |
