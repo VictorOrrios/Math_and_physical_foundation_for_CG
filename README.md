@@ -19,7 +19,7 @@ Computes the distance from each vertex to the nearest mesh boundary. The results
 
 ### Automatic UV Mapping
 
-Implements automatic UV parameterization for triangular meshes with **Euler characteristic \(\chi = 1\)**, corresponding to a topological disk under the usual connected, orientable manifold assumptions.
+Implements automatic UV parameterization for triangular meshes with **Euler characteristic \(&chi; = 1\)**, corresponding to a topological disk under the usual connected, orientable manifold assumptions.
 
 The method uses **barycentric mapping** (from *Polygon Mesh Processing 2010*) to compute 2D texture coordinates for mesh vertices, mapping the surface to a planar domain suitable for texture mapping.
 
