@@ -11,7 +11,7 @@ This project explores algorithms for processing triangular meshes: mesh statisti
 Computes the distance from each vertex to the nearest mesh boundary. The results are visualized on 3D models using color mapping.
 
 - **Performance:** Processed a mesh with 990K vertices (Nefertiti) in 1.77 seconds.
-- **Topology:** Supports manifold meshes with multiple boundary loops, including meshes with holes.
+- **Topology:** Supports manifold meshes with multiple boundary loops (Angel), including meshes with holes.
 
 | Nefertiti | Angel |
 |:---:|:---:|
