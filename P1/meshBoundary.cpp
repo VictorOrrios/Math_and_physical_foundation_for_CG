@@ -61,7 +61,7 @@ void updateEdgeLists(const SimpleMesh &mesh,
 
     for(auto& tri: mesh.triangles){
         for(auto& edge: tri.edges()){
-            if(internalSet.count(edge)){
+            if(externalSet.count(edge) || internalSet.count(edge)){
                 throw ("TODO 2.1 IMPOSIBLE: Input mesh is not a manifold");
             }
 
@@ -204,7 +204,7 @@ int main (int argc, char *argv[])
         // Build adjacency matrix to construct graph
 
         // Adjacency matrix: adj[vertexA][conexionIdx] = std::pair(vertexB, distance(vertexA,vertexB))
-        // Nested vector is sparse and not ordered => must iterate fully for query
+        // Conexion vector is sparse and not ordered => must iterate fully for query
         std::vector<std::vector<std::pair<unsigned, double>>> adj(mesh.numVertex());
 
         auto addEdge = [&](const SimpleEdge& e) {
