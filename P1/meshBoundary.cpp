@@ -80,22 +80,44 @@ void updateEdgeLists(const SimpleMesh &mesh,
     externalEdges.reserve(externalSet.size());
     internalEdges.reserve(internalSet.size());
 
+    vec3 minPos(INFINITY,INFINITY,INFINITY);
+    unsigned minVertex = -1;
+
+    auto updateMin = [&](unsigned v){
+        vec3 pos = mesh.coordinates[v];
+        if( (pos.X < minPos.X) ||
+            (pos.X == minPos.X && pos.Y < minPos.Y) ||
+            (pos.X == minPos.X && pos.Y == minPos.Y  && pos.Z < minPos.Z)
+            ){
+                minPos = pos;
+                minVertex = v;
+            }
+    };
+
     // Untangle the external edges
     std::unordered_map<unsigned,unsigned> edgeMap(externalSet.size());
     for(auto& exEdge: externalSet){
         if(edgeMap.count(exEdge.a)){
             edgeMap[exEdge.b] = exEdge.a;
+            updateMin(exEdge.b);
         }else{
             edgeMap[exEdge.a] = exEdge.b;
+            updateMin(exEdge.a);
         }
     }
 
-    unsigned startVertex = externalSet.begin()->a;
-    unsigned currVertex = startVertex;
+    unsigned currVertex = minVertex;
     for(size_t i = 0; i<externalSet.size(); i++){
-        if(!edgeMap.count(currVertex)) throw ("Broken external edge frontier");
+        if(!edgeMap.count(currVertex)){
+            // New loop => Find new staring point
+            for(auto& it: edgeMap)
+                updateMin(it.first);
+            currVertex = minVertex;
+        }
+
         unsigned nextVertex = edgeMap.at(currVertex);
         externalEdges.push_back(SimpleEdge(currVertex,nextVertex));
+        edgeMap.erase(currVertex);
         currVertex = nextVertex;
     }
 
@@ -176,6 +198,31 @@ int main (int argc, char *argv[])
         //Compute the distance from each vertex to the nearest vertex in the boundary (euclidean distance measured along edges)
         //and store it in the boundDist vector.
         //Store in deepestVertex the index of the vertex with the maximum distance to boundary
+
+        boundDist.assign(mesh.numVertex(), INFINITY);
+
+        // Build adjacency matrix to construct graph
+
+        // Adjacency matrix: adj[vertexA][conexionIdx] = std::pair(vertexB, distance(vertexA,vertexB))
+        // Nested vector is sparse and not ordered => must iterate fully for query
+        std::vector<std::vector<std::pair<unsigned, double>>> adj(mesh.numVertex());
+
+        auto addEdge = [&](const SimpleEdge& e) {
+            double w = mesh.edgeLength(e);
+
+            adj[e.a].push_back({e.b, w});
+            adj[e.b].push_back({e.a, w});
+        };
+
+        for (const auto& e : externalEdges)
+            addEdge(e);
+
+        for (const auto& e : internalEdges)
+            addEdge(e);
+
+
+
+
 
         //END TODO 2.2
         cout << "Done boundDist() " << duration<float>(high_resolution_clock::now() - clock0).count() << " seconds" << endl;
