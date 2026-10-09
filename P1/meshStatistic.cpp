@@ -95,6 +95,9 @@ int main (int argc, char *argv[])
         // Used for not visiting the same edge twice
         std::unordered_set<unsigned> vistedEdges;
 
+        // Used for later 'TODO's
+        std::vector<double> triShapesFactors(mesh.numTriangles());
+
         // Note, auxiliary functions are made in lamba form to fit inside the two 'TODO' comments
         for (size_t i = 0; i < mesh.numTriangles(); i++) {
             // Returns angle of vertex a over vertex b to c in format cos(alpha)
@@ -135,6 +138,7 @@ int main (int argc, char *argv[])
             const SimpleTriangle& tri = mesh.triangles.at(i);
             double area = mesh.triangleArea(tri);
             double shapeF = mesh.triangleShapeFactor(tri);
+            triShapesFactors[i] = shapeF;
 
             minArea = min(minArea,area);
             maxArea = max(maxArea,area);
@@ -263,13 +267,10 @@ int main (int argc, char *argv[])
         //Write triangles with ShapeFactor (radius / minEdge) greater than shapeFactorTh
         //Use messages formated as: "Triangle nnn has ShapeFactor xxx"
 
-        // NOTE: We alrealy calculated the shape factor of every triangle
-        // But we assume every 'TODO' is an isolated task
         for (size_t i = 0; i < mesh.numTriangles(); i++) {
-            const SimpleTriangle& tri = mesh.triangles.at(i);
-            auto shapeF = mesh.triangleShapeFactor(tri);
+            auto shapeF = triShapesFactors[i];
             if(shapeF<shapeFactorTh)
-                cout << "Triangle "<<i<<" has ShapeFactor "<<shapeF<<endl;
+                cout << "Triangle "<<i<<" has ShapeFactor < "<<shapeF<<endl;
         }
 
         //END TODO 1.2
@@ -289,8 +290,8 @@ int main (int argc, char *argv[])
         outputMesh.colors.resize(mesh.numVertex(),white);
 
         for (size_t i = 0; i < mesh.numTriangles(); i++) {
-            const SimpleTriangle& tri = mesh.triangles.at(i);
-            auto shapeF = mesh.triangleShapeFactor(tri);
+            const SimpleTriangle& tri = mesh.triangles[i];
+            auto shapeF = triShapesFactors[i];
             // Recolor if degenerated
             if(shapeF<shapeFactorTh){
                 outputMesh.colors[tri.a].set(1,0,0);

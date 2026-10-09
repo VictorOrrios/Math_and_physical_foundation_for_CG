@@ -1,1 +1,0 @@
-/usr/bin/c++  -fopenmp -Wl,--dependency-file=CMakeFiles/meshTexture-Sparse.dir/link.d "CMakeFiles/meshTexture-Sparse.dir/meshTexture-Sparse.cpp.o" -o meshTexture-Sparse

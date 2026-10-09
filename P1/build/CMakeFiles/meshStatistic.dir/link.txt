@@ -1,1 +1,0 @@
-/usr/bin/c++  -fopenmp -Wl,--dependency-file=CMakeFiles/meshStatistic.dir/link.d CMakeFiles/meshStatistic.dir/meshStatistic.cpp.o -o meshStatistic

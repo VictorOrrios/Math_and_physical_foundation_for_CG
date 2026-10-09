@@ -11,14 +11,17 @@
  * and writes the boundary (list of external edges). Then create a copy
  * of the mesh over a colorMesh and assign the red color to the vertex
  * in the boundary.
- * 
+ *
  * //TODO: Fill-in your name and email
- * Name of alumn: 
+ * Name of alumn:
  * Email of alumn:
  * Year: 2026
- * 
+ *
  */
 
+#include <cstddef>
+#include <unordered_map>
+#include <unordered_set>
 #ifdef _MSC_VER
 #pragma warning(error: 4101)
 #endif
@@ -26,18 +29,79 @@
 #define _CRT_NONSTDC_NO_DEPRECATE
 #include <iostream>
 #include <cmath>
-#include <SimpleMesh.hpp>
-#include <ColorMesh.hpp>
+#include "SimpleMesh.hpp"
+#include "ColorMesh.hpp"
 #include <chrono>
 using namespace std::chrono;
 
-/// Update the contents of externalEdges and internalEdges 
-void updateEdgeLists(const SimpleMesh &mesh, 
+/// Update the contents of externalEdges and internalEdges
+void updateEdgeLists(const SimpleMesh &mesh,
                      std::vector<SimpleEdge> &externalEdges,
                      std::vector<SimpleEdge> &internalEdges )
 {
     //TODO 2.1: Implement the body of the updateEdgeLists() method
-    throw ("updateEdgeLists has to be implemented as exercise");
+
+    // Hash function for an edge. Only works with edges contaning vertices in [0,mesh.numvertex())
+    struct SimpleEdgeHash {
+        std::size_t numVertex;
+        std::size_t operator()(const SimpleEdge& e) const {
+            return e.a + e.b*numVertex;
+        }
+    };
+
+    struct SimpleEdgeEqual {
+        bool operator()(const SimpleEdge& lhs, const SimpleEdge& rhs) const {
+            return lhs.a == rhs.a && lhs.b == rhs.b;
+        }
+    };
+
+    std::unordered_set<SimpleEdge, SimpleEdgeHash, SimpleEdgeEqual>
+    externalSet(0, SimpleEdgeHash{mesh.numVertex()}),
+    internalSet(0, SimpleEdgeHash{mesh.numVertex()});
+
+    for(auto& tri: mesh.triangles){
+        for(auto& edge: tri.edges()){
+            if(internalSet.count(edge)){
+                throw ("TODO 2.1 IMPOSIBLE: Input mesh is not a manifold");
+            }
+
+            auto rEdge = edge.reversed();
+            if(externalSet.count(rEdge)){
+                externalSet.erase(rEdge);
+                internalSet.insert(edge);
+            }else{
+                externalSet.insert(edge);
+            }
+        }
+    }
+
+    externalEdges.clear();
+    internalEdges.clear();
+    externalEdges.reserve(externalSet.size());
+    internalEdges.reserve(internalSet.size());
+
+    // Untangle the external edges
+    std::unordered_map<unsigned,unsigned> edgeMap(externalSet.size());
+    for(auto& exEdge: externalSet){
+        if(edgeMap.count(exEdge.a)){
+            edgeMap[exEdge.b] = exEdge.a;
+        }else{
+            edgeMap[exEdge.a] = exEdge.b;
+        }
+    }
+
+    unsigned startVertex = externalSet.begin()->a;
+    unsigned currVertex = startVertex;
+    for(size_t i = 0; i<externalSet.size(); i++){
+        if(!edgeMap.count(currVertex)) throw ("Broken external edge frontier");
+        unsigned nextVertex = edgeMap.at(currVertex);
+        externalEdges.push_back(SimpleEdge(currVertex,nextVertex));
+        currVertex = nextVertex;
+    }
+
+    for(auto& edge: internalSet)
+        internalEdges.push_back(edge);
+
     //END TODO 2.1
 
 }//void updateEdgeLists()
@@ -58,7 +122,7 @@ int main (int argc, char *argv[])
 
         ///////////////////////////////////////////////////////////////////////
         //Read a mesh and write a mesh
-        SimpleMesh mesh;        
+        SimpleMesh mesh;
         cout << "Loading file " << filename << endl;
         mesh.readFile(filename, false);
 
@@ -76,7 +140,7 @@ int main (int argc, char *argv[])
         std::vector<SimpleEdge> internalEdges;
         updateEdgeLists(mesh, externalEdges, internalEdges);
 
- 
+
         cout << "Done updateEdgeLists() " << duration<float>(high_resolution_clock::now() - clock0).count() << " seconds" << endl;
         cout << externalEdges.size() << " boundary edges" << endl;
         cout << internalEdges.size() << " internal edges" << endl;
@@ -175,4 +239,3 @@ int main (int argc, char *argv[])
 
     return 0;
 }
-

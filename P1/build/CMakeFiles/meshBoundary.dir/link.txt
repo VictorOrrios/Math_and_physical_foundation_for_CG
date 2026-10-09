@@ -1,1 +1,0 @@
-/usr/bin/c++  -fopenmp -Wl,--dependency-file=CMakeFiles/meshBoundary.dir/link.d CMakeFiles/meshBoundary.dir/meshBoundary.cpp.o -o meshBoundary
