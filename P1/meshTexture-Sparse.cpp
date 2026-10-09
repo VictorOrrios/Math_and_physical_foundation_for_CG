@@ -329,10 +329,6 @@ int main(int argc, char *argv[]) {
       addTriplets(tri.b, tri.c, Acot);
     }
 
-    cout << "Done triplets. "
-         << duration<float>(high_resolution_clock::now() - clock0).count()
-         << " seconds" << endl;
-
     // Initialize matrix
     meshMatrix.setFromTriplets(triplets.begin(), triplets.end());
     // VERY IMPORTANT!!! Reserve 8 edges per vertex, estimate of max connectivity, speeds up insertion a lot
