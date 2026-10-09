@@ -23,4 +23,6 @@ Implements automatic UV parameterization for triangular meshes with **Euler char
 
 The method uses **barycentric mapping** (from *Polygon Mesh Processing 2010*) to compute 2D texture coordinates for mesh vertices, mapping the surface to a planar domain suitable for texture mapping.
 
-![Automatic UV Mapping](images/P1UVMap.png "Automatic UV Mapping")
+| Plank, 45k vertices in 0.286 seconds |
+|:---:|
+| ![Automatic UV Mapping](images/P1UVMap.png "Automatic UV Mapping") |
