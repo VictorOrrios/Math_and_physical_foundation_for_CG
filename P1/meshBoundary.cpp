@@ -13,8 +13,8 @@
  * in the boundary.
  *
  * //TODO: Fill-in your name and email
- * Name of alumn:
- * Email of alumn:
+ * Name of alumn: Víctor Orrios Barón
+ * Email of alumn: v.orrios.2026@alumnos.urjc.es
  * Year: 2026
  *
  */
@@ -137,9 +137,10 @@ int main(int argc, char *argv[]) {
     // Set default input mesh filename
     // std::string filename("mallas/16Triangles.off");
     // std::string filename("mallas/mannequin.ply");
+    // std::string filename("mallas/mask2.ply");
     // std::string filename("mallas/knot-hole.ply");
-    std::string filename("mallas/Nefertiti.990kv.ply");
-    // std::string filename("mallas/angel_kneeling.150kv.ply");
+    // std::string filename("mallas/Nefertiti.990kv.ply");
+    std::string filename("mallas/angel_kneeling.150kv.ply");
 
     if (argc > 1)
       filename = std::string(argv[1]);

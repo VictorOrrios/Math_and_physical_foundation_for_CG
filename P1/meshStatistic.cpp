@@ -11,8 +11,8 @@
  * Also produce an output mesh with degenerate triangles remarked.
  *
  * //TODO: Fill-in your name and email
- * Name of alumn:
- * Email of alumn:
+ * Name of alumn: Víctor Orrios Barón
+ * Email of alumn: v.orrios.2026@alumnos.urjc.es
  * Year: 2026
  *
  */
@@ -37,7 +37,7 @@ int main (int argc, char *argv[])
     try
     {
         //Set default input mesh filename
-        std::string filename("mallas/mannequin.ply");
+        std::string filename("mallas/mask2.ply");
         if (argc >1)
             filename = std::string(argv[1]);
 

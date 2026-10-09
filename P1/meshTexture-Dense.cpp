@@ -8,8 +8,8 @@
  * Its purpose is to be didactic and easy to understand, not hard optimized.
  *
  * //TODO: Fill-in your name and email
- * Name of alumn:
- * Email of alumn:
+ * Name of alumn: Víctor Orrios Barón
+ * Email of alumn: v.orrios.2026@alumnos.urjc.es
  * Year: 2026
  *
  */

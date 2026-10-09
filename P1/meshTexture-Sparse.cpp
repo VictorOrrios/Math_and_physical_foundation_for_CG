@@ -8,8 +8,8 @@
  * Its purpose is to be didactic and easy to understand, not hard optimized.
  *
  * //TODO: Fill-in your name and email
- * Name of alumn:
- * Email of alumn:
+ * Name of alumn: Víctor Orrios Barón
+ * Email of alumn: v.orrios.2026@alumnos.urjc.es
  * Year: 2026
  *
  */
@@ -209,7 +209,8 @@ int main(int argc, char *argv[]) {
     // std::string filename("mallas/mask2.ply"); // Easy case test
     // std::string filename("mallas/mannequin2.ply"); //Medium case test
     // std::string filename("mallas/laurana50k.ply"); //Really hard for dense
-    std::string filename("mallas/MaxPlanck.45kv.ply");
+    // std::string filename("mallas/MaxPlanck.45kv.ply");
+    std::string filename("mallas/Nefertiti.990kv.ply");
     if (argc > 1)
       filename = std::string(argv[1]);
 
