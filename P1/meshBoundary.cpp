@@ -42,8 +42,6 @@ void updateEdgeLists(const SimpleMesh &mesh,
                      std::vector<SimpleEdge> &internalEdges) {
   // TODO 2.1: Implement the body of the updateEdgeLists() method
 
-  high_resolution_clock::time_point clock0 = high_resolution_clock::now();
-
   // Hash function for an edge. Only works with edges contaning vertices in
   // [0,mesh.numvertex())
   struct SimpleEdgeHash {
@@ -74,16 +72,12 @@ void updateEdgeLists(const SimpleMesh &mesh,
       auto externalIt = externalSet.find(edge);
       if (externalIt != externalSet.end()) {
         externalSet.erase(externalIt);
-        internalSet.insert(internalIt,edge);
+        internalSet.insert(internalIt, edge);
       } else {
-        externalSet.insert(externalIt,edge);
+        externalSet.insert(externalIt, edge);
       }
     }
   }
-
-  cout << "Done: Frontier find "
-       << duration<float>(high_resolution_clock::now() - clock0).count()
-       << " seconds" << endl;
 
   externalEdges.clear();
   internalEdges.clear();
@@ -118,6 +112,8 @@ void updateEdgeLists(const SimpleMesh &mesh,
   for (size_t i = 0; i < externalSet.size(); i++) {
     if (!edgeMap.count(currVertex)) {
       // New loop => Find new staring point
+      minPos.set(INFINITY, INFINITY, INFINITY);
+      minVertex = -1;
       for (auto &it : edgeMap)
         updateMin(it.first);
       currVertex = minVertex;
@@ -132,7 +128,6 @@ void updateEdgeLists(const SimpleMesh &mesh,
   for (auto &edge : internalSet)
     internalEdges.push_back(edge);
 
-
   // END TODO 2.1
 
 } // void updateEdgeLists()
@@ -144,6 +139,7 @@ int main(int argc, char *argv[]) {
     // std::string filename("mallas/mannequin.ply");
     // std::string filename("mallas/knot-hole.ply");
     std::string filename("mallas/Nefertiti.990kv.ply");
+    // std::string filename("mallas/angel_kneeling.150kv.ply");
 
     if (argc > 1)
       filename = std::string(argv[1]);
@@ -317,8 +313,8 @@ int main(int argc, char *argv[]) {
     // Iterate over the vertex of the mesh and set the color
     // of each vertex using its boundDistance
     for (size_t i = 0; i < mesh.numVertex(); i++) {
-        outputMesh.colors[i].setTemperature(float(boundDist[i]), 0,
-                                            float(maxDist));
+      outputMesh.colors[i].setTemperature(float(maxDist - boundDist[i]), 0,
+                                          float(maxDist));
     }
 
     // Save result to a file in .ply format
