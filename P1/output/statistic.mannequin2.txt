@@ -1,0 +1,17 @@
+Loading file mallas/mannequin2.ply
+
+Num vertex: 6706 Num triangles: 13255 Unreferenced vertex: 0
+
+Area    min: 0.0013 max: 0.7581 average: 0.1191 total: 1578.9170
+Angle   min: 0.1189 max: 2.7538
+EdgeLen min: 0.0382 max: 1.8653 average: 0.4922
+ShapeF  min: 0.1370 max: 0.9978 average: 0.7183
+VertexA min: 0.0045 max: 1.3521 average: 0.2354 total: 1578.9170
+
+3 triangles with ShapeFactor < 0.1443
+Triangle 2014 has ShapeFactor 0.1441
+Triangle 3484 has ShapeFactor 0.1370
+Triangle 3748 has ShapeFactor 0.1420
+
+Saving output to output_statistic.ply
+Executing external command: meshlab output_statistic.ply

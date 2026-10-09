@@ -1,0 +1,18 @@
+Loading file ../jespa/mallas/mask2.ply
+Num vertex: 326 Num triangles: 595 Unreferenced vertex: 0
+Done updateEdgeLists() 0.00017357 seconds
+55 boundary edges
+865 internal edges
+Edges in the boundary:
+[318->320] [320->319] [319->192] [192->205] [205->269] [269->189] [189->204] [204->187] [187->263] [263->203] [203->266] [266->265] [265->198] [198->39] [39->104] [104->36] [36->105] [105->27] [27->43] [43->30] [30->44] [44->42] [42->45] [45->152] [152->154] [154->144] [144->143] [143->145] [145->123] [123->151] [151->150] [150->165] [165->114] [114->115] [115->21] [21->20] [20->13] [13->17] [17->16] [16->14] [14->173] [173->175] [175->172] [172->178] [178->179] [179->276] [276->275] [275->196] [196->313] [313->316] [316->315] [315->314] [314->301] [301->317] [317->318] 
+Boundary length: 5.19081
+Euler Characteristic: 1
+Done boundDist() 0.000324176 seconds
+maxDistance to boundary: 0.866628 at vertex: 99
+Saving output to output_boundary.ply
+Done colorize by distance to boundary 0.000593903 seconds
+Executing external command: meshlab >/dev/null 2>&1  output_boundary.ply
+
+real	0m0.015s
+user	0m0.015s
+sys	0m0.000s

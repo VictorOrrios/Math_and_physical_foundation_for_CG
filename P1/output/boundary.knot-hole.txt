@@ -1,0 +1,18 @@
+Loading file ../jespa/mallas/knot-hole.ply
+Num vertex: 1440 Num triangles: 2879 Unreferenced vertex: 0
+Done updateEdgeLists() 0.000440064 seconds
+3 boundary edges
+4317 internal edges
+Edges in the boundary:
+[614->627] [627->626] [626->614] 
+Boundary length: 46.8564
+Euler Characteristic: -1
+Done boundDist() 0.000849881 seconds
+maxDistance to boundary: 395.75 at vertex: 1347
+Saving output to output_boundary.ply
+Done colorize by distance to boundary 0.00171983 seconds
+Executing external command: meshlab >/dev/null 2>&1  output_boundary.ply
+
+real	0m0.018s
+user	0m0.014s
+sys	0m0.005s

@@ -1,0 +1,21 @@
+Loading file ../jespa/mallas/mannequin2.ply
+Num vertex: 6706 Num triangles: 13255 Unreferenced vertex: 0
+155 vertex in external boundary: 
+Done compute Boundary. 0.00243814 seconds
+Computing Laplace matrix (dense):
+Done weights matrix. 0.118353 seconds
+Computing Laplacian matrix:
+Done Laplacian matrix (dense). 0.118395 seconds
+Computing System matrix:
+Done System matrix. 0.133635 seconds
+Computing contour conditions:
+Done contour conditions. 0.133702 seconds
+Solving the system using Eigen (dense):
+Done solving the system. 10.4048 seconds
+Saving parameterization mesh to output_UVMesh1.ply
+Saving texture mesh to output_UVMesh2.ply
+Executing external command: meshlab >/dev/null 2>&1  output_UVMesh2.ply
+
+real	0m10.456s
+user	0m58.753s
+sys	0m0.239s

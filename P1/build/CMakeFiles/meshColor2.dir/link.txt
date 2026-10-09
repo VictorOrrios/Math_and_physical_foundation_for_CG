@@ -1,0 +1,1 @@
+/usr/bin/c++  -fopenmp -Wl,--dependency-file=CMakeFiles/meshColor2.dir/link.d CMakeFiles/meshColor2.dir/meshColor2.cpp.o -o meshColor2

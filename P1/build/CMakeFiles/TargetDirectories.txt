@@ -1,0 +1,8 @@
+/home/victor/dev/FundamentosMatematicos/P1/build/CMakeFiles/meshColor.dir
+/home/victor/dev/FundamentosMatematicos/P1/build/CMakeFiles/meshColor2.dir
+/home/victor/dev/FundamentosMatematicos/P1/build/CMakeFiles/meshStatistic.dir
+/home/victor/dev/FundamentosMatematicos/P1/build/CMakeFiles/meshBoundary.dir
+/home/victor/dev/FundamentosMatematicos/P1/build/CMakeFiles/meshTexture-Dense.dir
+/home/victor/dev/FundamentosMatematicos/P1/build/CMakeFiles/meshTexture-Sparse.dir
+/home/victor/dev/FundamentosMatematicos/P1/build/CMakeFiles/edit_cache.dir
+/home/victor/dev/FundamentosMatematicos/P1/build/CMakeFiles/rebuild_cache.dir

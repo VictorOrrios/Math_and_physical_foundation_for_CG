@@ -1,0 +1,5 @@
+# Code editors
+.zed/
+.vs/
+.vscode/
+.idea/

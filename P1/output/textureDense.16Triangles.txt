@@ -1,0 +1,31 @@
+Loading file ../jespa/mallas/16Triangles.off
+Num vertex: 15 Num triangles: 16 Unreferenced vertex: 0
+12 vertex in external boundary: 
+[5->14] [14->0] [0->11] [11->4] [4->12] [12->2] [2->9] [9->1] [1->10] [10->3] [3->13] [13->5] 
+Done compute Boundary. 1.048e-05 seconds
+Computing Laplace matrix (dense):
+Done weights matrix. 2.3836e-05 seconds
+Computing Laplacian matrix:
+Done Laplacian matrix (dense). 2.66e-05 seconds
+Export matrix L to file: laplacian.mat
+To import L into matlab use the command: load("laplacian.mat")
+Computing System matrix:
+Done System matrix. 0.000135324 seconds
+Export matrix A to file: systemMatrix.mat
+To import A into matlab use the command: load("systemMatrix.mat")
+Computing contour conditions:
+Done contour conditions. 0.000247125 seconds
+Export matrix UV0 to file: boundaryUVO.mat
+To import UV0 into matlab use the command: load("boundaryUVO.mat")
+Exporting to matlab
+Solving the system using Eigen (dense):
+Done solving the system. 0.000341395 seconds
+Export matrix UV to file: solutionUV.mat
+To import UV into matlab use the command: load("solutionUV.mat")
+Saving parameterization mesh to output_UVMesh1.ply
+Saving texture mesh to output_UVMesh2.ply
+Executing external command: meshlab >/dev/null 2>&1  output_UVMesh2.ply
+
+real	0m0.019s
+user	0m0.013s
+sys	0m0.002s

@@ -1,0 +1,21 @@
+Loading file ../jespa/mallas/maxplanck.45kv.ply
+Num vertex: 45045 Num triangles: 89641 Unreferenced vertex: 0
+447 vertex in external boundary: 
+Done compute Boundary. 0.0149044 seconds
+Computing Laplace matrix (sparse):
+Done weights matrix. 0.037834 seconds
+Computing Laplacian matrix:
+Done Laplacian matrix (sparse). 0.0378566 seconds
+Computing System matrix:
+Done System matrix. 0.0383464 seconds
+Computing contour conditions:
+Done contour conditions. 0.0384241 seconds
+Solving the system using Eigen (sparse):
+Done solving the system. 0.570171 seconds
+Saving parameterization mesh to output_UVMesh1.ply
+Saving texture mesh to output_UVMesh2.ply
+Executing external command: meshlab >/dev/null 2>&1  output_UVMesh2.ply
+
+real	0m0.668s
+user	0m0.616s
+sys	0m0.053s

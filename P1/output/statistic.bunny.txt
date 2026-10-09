@@ -1,0 +1,23 @@
+Loading file mallas/bunny.ply
+
+Num vertex: 602 Num triangles: 1200 Unreferenced vertex: 0
+
+Area    min: 0.0592 max: 1.9252 average: 0.4702 total: 564.2106
+Angle   min: 0.0234 max: 3.0272
+EdgeLen min: 0.2722 max: 3.6959 average: 1.1660
+ShapeF  min: 0.0270 max: 0.9885 average: 0.6277
+VertexA min: 0.1823 max: 2.9758 average: 0.9372 total: 564.2106
+
+9 triangles with ShapeFactor < 0.1443
+Triangle 135 has ShapeFactor 0.1122
+Triangle 269 has ShapeFactor 0.1291
+Triangle 297 has ShapeFactor 0.0270
+Triangle 408 has ShapeFactor 0.1263
+Triangle 544 has ShapeFactor 0.1337
+Triangle 717 has ShapeFactor 0.0871
+Triangle 1063 has ShapeFactor 0.1120
+Triangle 1091 has ShapeFactor 0.1258
+Triangle 1108 has ShapeFactor 0.0935
+
+Saving output to output_statistic.ply
+Executing external command: meshlab output_statistic.ply

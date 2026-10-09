@@ -1,0 +1,22 @@
+Loading file ../jespa/mallas/mask2.off
+Num vertex: 326 Num triangles: 595 Unreferenced vertex: 0
+55 vertex in external boundary: 
+[318->320] [320->319] [319->192] [192->205] [205->269] [269->189] [189->204] [204->187] [187->263] [263->203] [203->266] [266->265] [265->198] [198->39] [39->104] [104->36] [36->105] [105->27] [27->43] [43->30] [30->44] [44->42] [42->45] [45->152] [152->154] [154->144] [144->143] [143->145] [145->123] [123->151] [151->150] [150->165] [165->114] [114->115] [115->21] [21->20] [20->13] [13->17] [17->16] [16->14] [14->173] [173->175] [175->172] [172->178] [178->179] [179->276] [276->275] [275->196] [196->313] [313->316] [316->315] [315->314] [314->301] [301->317] [317->318] 
+Done compute Boundary. 0.000181056 seconds
+Computing Laplace matrix (dense):
+Done weights matrix. 0.000496579 seconds
+Computing Laplacian matrix:
+Done Laplacian matrix (dense). 0.000499992 seconds
+Computing System matrix:
+Done System matrix. 0.000550476 seconds
+Computing contour conditions:
+Done contour conditions. 0.000566483 seconds
+Solving the system using Eigen (dense):
+Done solving the system. 0.087471 seconds
+Saving parameterization mesh to output_UVMesh1.ply
+Saving texture mesh to output_UVMesh2.ply
+Executing external command: meshlab >/dev/null 2>&1  output_UVMesh2.ply
+
+real	0m0.101s
+user	0m0.605s
+sys	0m0.003s

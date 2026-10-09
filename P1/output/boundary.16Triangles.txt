@@ -1,0 +1,35 @@
+Loading file ../jespa/mallas/16Triangles.off
+Num vertex: 15 Num triangles: 16 Unreferenced vertex: 0
+Done updateEdgeLists() 7.049e-06 seconds
+12 boundary edges
+18 internal edges
+Edges in the boundary:
+[5->14] [14->0] [0->11] [11->4] [4->12] [12->2] [2->9] [9->1] [1->10] [10->3] [3->13] [13->5] 
+Boundary length: 9.85725
+Euler Characteristic: 1
+Done boundDist() 5.282e-05 seconds
+maxDistance to boundary: 0.816499 at vertex: 7
+Distances to boundary: 
+vertex: 0 : 0
+vertex: 1 : 0
+vertex: 2 : 0
+vertex: 3 : 0
+vertex: 4 : 0
+vertex: 5 : 0
+vertex: 6 : 0.816497
+vertex: 7 : 0.816499
+vertex: 8 : 0.816499
+vertex: 9 : 0
+vertex: 10 : 0
+vertex: 11 : 0
+vertex: 12 : 0
+vertex: 13 : 0
+vertex: 14 : 0
+
+Saving output to output_boundary.ply
+Done colorize by distance to boundary 0.000169279 seconds
+Executing external command: meshlab >/dev/null 2>&1  output_boundary.ply
+
+real	0m0.067s
+user	0m0.012s
+sys	0m0.003s
