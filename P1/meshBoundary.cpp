@@ -19,6 +19,7 @@
  *
  */
 
+#include "ColorMesh.hpp"
 #include <cstddef>
 #include <queue>
 #include <unordered_map>
@@ -308,24 +309,16 @@ int main(int argc, char *argv[]) {
     // boundary Save the color mesh to a PLY file named "output_boundary.ply"
     // See meshColor.cpp or meshColor2.cpp to see an how-to example
 
-    // From Iñigo Quilez: https://www.shadertoy.com/view/ll2GD3
-    auto palette = [](const float t, const vec3 a, const vec3 b, const vec3 c, const vec3 d )
-    {
-        auto aux = 6.28318*(c*t+d);
-        vec3 aux2 = vec3(cos(aux.X),cos(aux.Y),cos(aux.Z));
-        return a + (b * aux2);
-    }
-
-    TextureMesh outputMesh;
+    ColorMesh outputMesh;
     outputMesh.coordinates = mesh.coordinates;
     outputMesh.triangles = mesh.triangles;
-    outputMesh.textureFile = "isolinesTexture2.png";
-    outputMesh.UV.resize(mesh.numVertex());
+    outputMesh.colors.resize(mesh.numVertex());
 
     // Iterate over the vertex of the mesh and set the color
     // of each vertex using its boundDistance
     for (size_t i = 0; i < mesh.numVertex(); i++) {
-      outputMesh.UV[i].set(0, float(boundDist[i]) / float(maxDist));
+        outputMesh.colors[i].setTemperature(float(boundDist[i]), 0,
+                                            float(maxDist));
     }
 
     // Save result to a file in .ply format
