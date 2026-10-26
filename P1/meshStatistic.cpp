@@ -29,15 +29,17 @@
 #include <iostream>
 #include <iomanip>
 #include <cstdlib>
+#include <chrono>
 #include "SimpleMesh.hpp"
 #include "ColorMesh.hpp"
+using namespace std::chrono;
 
 int main (int argc, char *argv[])
 {
     try
     {
         //Set default input mesh filename
-        std::string filename("mallas/mask2.ply");
+        std::string filename("mallas/Nefertiti.990kv.ply");
         if (argc >1)
             filename = std::string(argv[1]);
 
@@ -74,6 +76,8 @@ int main (int argc, char *argv[])
         // Compute the values for minAngle, maxAngle;
         // Compute the values for minEdgeLen, maxEdgeLen, averageEdgeLen;
         // Compute the values for minShapeFactor, maxShapeFactor, averageShapeFactor;
+
+        high_resolution_clock::time_point clock0 = high_resolution_clock::now();
 
         // Ensure correct initialization
         minArea = std::numeric_limits<double>::max();
@@ -246,6 +250,10 @@ int main (int argc, char *argv[])
             sumVertexAreas += area;
         }
 
+        cout << "Done statistic() "
+             << duration<float>(high_resolution_clock::now() - clock0).count()
+             << " seconds" << endl;
+
         //END TODO OPTATIVE 1
 
         //Check values for vertex areas and compute sum of areas:
@@ -267,11 +275,20 @@ int main (int argc, char *argv[])
         //Write triangles with ShapeFactor (radius / minEdge) greater than shapeFactorTh
         //Use messages formated as: "Triangle nnn has ShapeFactor xxx"
 
+        std::vector<uint> shapeTris;
+        shapeTris.reserve(10);
+
         for (size_t i = 0; i < mesh.numTriangles(); i++) {
             auto shapeF = triShapesFactors[i];
             if(shapeF<shapeFactorTh)
-                cout << "Triangle "<<i<<" has ShapeFactor < "<<shapeF<<endl;
+                shapeTris.push_back(i);
         }
+
+        cout<<endl<<shapeTris.size()<<" triangles with ShapeFactor < "<<shapeFactorTh<<endl;
+        for(auto& t: shapeTris){
+            cout<<"Triangle "<<t<<" has ShapeFactor "<<triShapesFactors[t]<<endl;
+        }
+        cout<<endl;
 
         //END TODO 1.2
 
@@ -317,6 +334,7 @@ int main (int argc, char *argv[])
         string cmd = viewcmd + " " + outputFilename;
         cout << "Executing external command: " << cmd << endl;
 
+        return 0;
         return system(cmd.c_str());
 
         //END TODO 1.3

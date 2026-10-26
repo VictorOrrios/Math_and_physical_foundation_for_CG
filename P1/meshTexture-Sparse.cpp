@@ -18,6 +18,7 @@
 // Use a sparse matrix, and a sparse solver to solve the system. It can
 // successfully compute huge mesh efficiently.
 
+#include <utility>
 #define _CRT_NONSTDC_NO_DEPRECATE
 #include <chrono>
 #include <iostream>
@@ -295,14 +296,28 @@ int main(int argc, char *argv[]) {
     //       \/         .
     //
 
+    std::vector<bool> isBoundary(numVertex, false);
+    for (const auto &edge : externalEdges) {
+      isBoundary[edge.a] = true;
+      isBoundary[edge.b] = true;
+    }
+
     std::vector<Eigen::Triplet<double>> triplets;
     triplets.reserve(mesh.triangles.size() * 6);
+
+    std::vector<double> sumRow(numVertex, 0.0);
 
     // Out of order cotanget sum
     for (auto &tri : mesh.triangles) {
       auto addTriplets = [&](unsigned a, unsigned b, double cot) {
-        triplets.emplace_back(a, b, cot);
-        triplets.emplace_back(b, a, cot);
+        sumRow[a] += cot;
+        sumRow[b] += cot;
+
+        if (!isBoundary[a])
+          triplets.emplace_back(a, b, cot);
+
+        if (!isBoundary[b])
+            triplets.emplace_back(b, a, cot);
       };
 
       vec3 A = mesh.coordinates[tri.a];
@@ -332,7 +347,8 @@ int main(int argc, char *argv[]) {
 
     // Initialize matrix
     meshMatrix.setFromTriplets(triplets.begin(), triplets.end());
-    // VERY IMPORTANT!!! Reserve 8 edges per vertex, estimate of max connectivity, speeds up insertion a lot
+    // VERY IMPORTANT!!! Reserve 8 edges per vertex, estimate of max
+    // connectivity, speeds up insertion a lot
     meshMatrix.reserve(Eigen::VectorXi::Constant(numVertex, 8));
 
     cout << "Done matrix init. "
@@ -340,17 +356,9 @@ int main(int argc, char *argv[]) {
          << " seconds" << endl;
 
     // Diagonal correction
-    std::vector<double> sumRow(numVertex, 0.0);
-
-    for (int k = 0; k < meshMatrix.outerSize(); ++k) {
-      for (Eigen::SparseMatrix<double>::InnerIterator it(meshMatrix, k); it;
-           ++it) {
-        sumRow[it.row()] += it.value();
-      }
-    }
-
     for (size_t i = 0; i < numVertex; ++i) {
-      meshMatrix.coeffRef(i, i) = -sumRow[i];
+      if (!isBoundary[i])
+        meshMatrix.coeffRef(i, i) = -sumRow[i];
     }
 
     // END TODO 3.1
@@ -367,17 +375,14 @@ int main(int argc, char *argv[]) {
     // Build system matrix
     cout << "Computing System matrix:" << endl;
 
+    // TODO 3.2: Patch Laplace matrix to generate a valid system of equations
+
     // Add frontier vertices
     for (auto &edge : externalEdges) {
-      for (size_t i = 0; i < mesh.numVertex(); i++) {
-        if (meshMatrix.coeff(edge.a, i) != 0) {
-          meshMatrix.coeffRef(edge.a, i) = 0;
-        }
-      }
       meshMatrix.coeffRef(edge.a, edge.a) = 1;
     }
-
-    // TODO 3.2: Patch Laplace matrix to generate a valid system of equations
+    //meshMatrix.prune(0.0);
+    meshMatrix.makeCompressed();
 
     // END TODO 3.2
 
@@ -461,7 +466,8 @@ int main(int argc, char *argv[]) {
     // TODO 3.4: Solve the system using the sparse matrix. Leave solution in UV
     // Check http://eigen.tuxfamily.org/dox/group__TopicSparseSystems.html
 
-    Eigen::SparseLU<Eigen::SparseMatrix<double>> solver; // General solver, slow
+    Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
+    //Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
 
     solver.compute(meshMatrix);
 

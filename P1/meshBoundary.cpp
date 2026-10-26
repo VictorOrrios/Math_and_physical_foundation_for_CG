@@ -140,7 +140,8 @@ int main(int argc, char *argv[]) {
     // std::string filename("mallas/mask2.ply");
     // std::string filename("mallas/knot-hole.ply");
     // std::string filename("mallas/Nefertiti.990kv.ply");
-    std::string filename("mallas/angel_kneeling.150kv.ply");
+    //std::string filename("mallas/angel_kneeling.150kv.ply");
+    std::string filename("mallas/bunny.ply");
 
     if (argc > 1)
       filename = std::string(argv[1]);
@@ -270,6 +271,11 @@ int main(int argc, char *argv[]) {
       }
     }
 
+    if(maxDist==INFINITY){
+        cout<<"meshBoundary IMPOSIBLE: No frontier found, fatal error"<<endl;
+        return 1;
+    }
+
     // END TODO 2.2
     cout << "Done boundDist() "
          << duration<float>(high_resolution_clock::now() - clock0).count()
@@ -314,8 +320,8 @@ int main(int argc, char *argv[]) {
     // Iterate over the vertex of the mesh and set the color
     // of each vertex using its boundDistance
     for (size_t i = 0; i < mesh.numVertex(); i++) {
-      outputMesh.colors[i].setTemperature(float(maxDist - boundDist[i]), 0,
-                                          float(maxDist));
+    outputMesh.colors[i].setTemperature(float(maxDist - boundDist[i]), 0,
+                                        float(maxDist));
     }
 
     // Save result to a file in .ply format
