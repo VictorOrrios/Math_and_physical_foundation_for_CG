@@ -21,6 +21,7 @@
 
 #include "ColorMesh.hpp"
 #include <cstddef>
+#include <cstdint>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -42,53 +43,78 @@ void updateEdgeLists(const SimpleMesh &mesh,
                      std::vector<SimpleEdge> &internalEdges) {
   // TODO 2.1: Implement the body of the updateEdgeLists() method
 
-  // Hash function for an edge. Only works with edges contaning vertices in
-  // [0,mesh.numvertex())
   struct SimpleEdgeHash {
-    std::size_t numVertex;
-    std::size_t operator()(const SimpleEdge &e) const {
-      return min(e.a, e.b) + max(e.a, e.b) * numVertex;
+    std::size_t operator()(const SimpleEdge &e) const noexcept {
+      const std::uint32_t lo = std::min(e.a, e.b);
+      const std::uint32_t hi = std::max(e.a, e.b);
+
+      return static_cast<std::size_t>((static_cast<std::uint64_t>(lo) << 32) |
+                                      hi);
     }
   };
 
   struct SimpleEdgeEqual {
-    bool operator()(const SimpleEdge &lhs, const SimpleEdge &rhs) const {
+    bool operator()(const SimpleEdge &lhs,
+                    const SimpleEdge &rhs) const noexcept {
       return (lhs.a == rhs.a && lhs.b == rhs.b) ||
              (lhs.a == rhs.b && lhs.b == rhs.a);
     }
   };
 
-  std::unordered_set<SimpleEdge, SimpleEdgeHash, SimpleEdgeEqual> externalSet(
-      0, SimpleEdgeHash{mesh.numVertex()}),
-      internalSet(0, SimpleEdgeHash{mesh.numVertex()});
+  // Count how many times each undirected edge appears:
+  // 1 -> external edge
+  // 2 -> internal edge
+  // >2 -> non-manifold mesh
+  std::unordered_map<SimpleEdge, unsigned char, SimpleEdgeHash, SimpleEdgeEqual>
+      edgeCounts;
 
-  for (auto &tri : mesh.triangles) {
-    for (auto &edge : tri.edges()) {
-      auto internalIt = internalSet.find(edge);
-      if (internalIt != internalSet.end()) {
-        throw("TODO 2.1 IMPOSIBLE: Input mesh is not a manifold");
-      }
+  const std::size_t maxEdgeOccurrences = 3 * mesh.triangles.size();
+  edgeCounts.reserve(maxEdgeOccurrences);
 
-      auto externalIt = externalSet.find(edge);
-      if (externalIt != externalSet.end()) {
-        externalSet.erase(externalIt);
-        internalSet.insert(internalIt, edge);
+  uint32_t numInternalEdges = 0;
+
+  for (const auto &tri : mesh.triangles) {
+    for (const auto &edge : tri.edges()) {
+      auto it = edgeCounts.find(edge);
+
+      if (it == edgeCounts.end()) {
+        edgeCounts.emplace(edge, 1);
       } else {
-        externalSet.insert(externalIt, edge);
+        if (it->second == 2) {
+          throw "TODO 2.1 IMPOSIBLE: Input mesh is not a manifold";
+        }
+
+        it->second++;
+        numInternalEdges++;
       }
     }
   }
 
   externalEdges.clear();
   internalEdges.clear();
-  externalEdges.reserve(externalSet.size());
-  internalEdges.reserve(internalSet.size());
 
+  externalEdges.reserve(maxEdgeOccurrences - numInternalEdges);
+  internalEdges.reserve(numInternalEdges);
+
+  // Separate external and internal edges.
+  for (const auto &entry : edgeCounts) {
+    const SimpleEdge &edge = entry.first;
+    const unsigned char count = entry.second;
+
+    if (count == 1) {
+      externalEdges.push_back(edge);
+    } else {
+      internalEdges.push_back(edge);
+    }
+  }
+
+  // Find the smallest vertex on the boundary.
   vec3 minPos(INFINITY, INFINITY, INFINITY);
-  unsigned minVertex = -1;
+  unsigned minVertex = static_cast<unsigned>(-1);
 
   auto updateMin = [&](unsigned v) {
-    vec3 pos = mesh.coordinates[v];
+    const vec3 &pos = mesh.coordinates[v];
+
     if ((pos.X < minPos.X) || (pos.X == minPos.X && pos.Y < minPos.Y) ||
         (pos.X == minPos.X && pos.Y == minPos.Y && pos.Z < minPos.Z)) {
       minPos = pos;
@@ -96,41 +122,59 @@ void updateEdgeLists(const SimpleMesh &mesh,
     }
   };
 
-  // Untangle the external edges
-  std::unordered_map<unsigned, unsigned> edgeMap(externalSet.size());
-  for (auto &exEdge : externalSet) {
-    if (edgeMap.count(exEdge.a)) {
-      edgeMap[exEdge.b] = exEdge.a;
+  // Build the boundary edge map.
+  std::unordered_map<unsigned, unsigned> edgeMap;
+  edgeMap.reserve(externalEdges.size());
+
+  for (const auto &exEdge : externalEdges) {
+    auto it = edgeMap.find(exEdge.a);
+
+    if (it != edgeMap.end()) {
+      edgeMap.emplace(exEdge.b, exEdge.a);
       updateMin(exEdge.b);
     } else {
-      edgeMap[exEdge.a] = exEdge.b;
+      edgeMap.emplace(exEdge.a, exEdge.b);
       updateMin(exEdge.a);
     }
   }
 
+  // Order external edges into boundary loops.
   unsigned currVertex = minVertex;
-  for (size_t i = 0; i < externalSet.size(); i++) {
-    if (!edgeMap.count(currVertex)) {
-      // New loop => Find new staring point
+
+  while (!edgeMap.empty()) {
+    auto it = edgeMap.find(currVertex);
+
+    if (it == edgeMap.end()) {
+      // Start a new boundary loop.
       minPos.set(INFINITY, INFINITY, INFINITY);
-      minVertex = -1;
-      for (auto &it : edgeMap)
-        updateMin(it.first);
+      minVertex = static_cast<unsigned>(-1);
+
+      for (const auto &entry : edgeMap) {
+        updateMin(entry.first);
+      }
+
+      if (minVertex == static_cast<unsigned>(-1)) {
+        break;
+      }
+
       currVertex = minVertex;
+      it = edgeMap.find(currVertex);
+
+      if (it == edgeMap.end()) {
+        throw "Invalid boundary edge map";
+      }
     }
 
-    unsigned nextVertex = edgeMap.at(currVertex);
+    const unsigned nextVertex = it->second;
+
     externalEdges.push_back(SimpleEdge(currVertex, nextVertex));
-    edgeMap.erase(currVertex);
+
+    edgeMap.erase(it);
     currVertex = nextVertex;
   }
 
-  for (auto &edge : internalSet)
-    internalEdges.push_back(edge);
-
   // END TODO 2.1
-
-} // void updateEdgeLists()
+}
 
 int main(int argc, char *argv[]) {
   try {
@@ -139,9 +183,9 @@ int main(int argc, char *argv[]) {
     // std::string filename("mallas/mannequin.ply");
     // std::string filename("mallas/mask2.ply");
     // std::string filename("mallas/knot-hole.ply");
-    // std::string filename("mallas/Nefertiti.990kv.ply");
-    //std::string filename("mallas/angel_kneeling.150kv.ply");
-    std::string filename("mallas/bunny.ply");
+    std::string filename("mallas/Nefertiti.990kv.ply");
+    // std::string filename("mallas/angel_kneeling.150kv.ply");
+    // std::string filename("mallas/bunny.ply");
 
     if (argc > 1)
       filename = std::string(argv[1]);
@@ -271,9 +315,9 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    if(maxDist==INFINITY){
-        cout<<"meshBoundary IMPOSIBLE: No frontier found, fatal error"<<endl;
-        return 1;
+    if (maxDist == INFINITY) {
+      cout << "meshBoundary IMPOSIBLE: No frontier found, fatal error" << endl;
+      return 1;
     }
 
     // END TODO 2.2
@@ -320,8 +364,8 @@ int main(int argc, char *argv[]) {
     // Iterate over the vertex of the mesh and set the color
     // of each vertex using its boundDistance
     for (size_t i = 0; i < mesh.numVertex(); i++) {
-    outputMesh.colors[i].setTemperature(float(maxDist - boundDist[i]), 0,
-                                        float(maxDist));
+      outputMesh.colors[i].setTemperature(float(maxDist - boundDist[i]), 0,
+                                          float(maxDist));
     }
 
     // Save result to a file in .ply format
