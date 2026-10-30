@@ -180,7 +180,7 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
 
       // Record counts, compute internal count using total visited - external
       // marked
-      intExtCounts[tid][0] = it - skipStart - localExt;
+      intExtCounts[tid][0] = (it - skipStart - localExt) / 2;
       intExtCounts[tid][1] = localExt;
     }
 
@@ -194,13 +194,21 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
       for (int i = 0; i < numThreads; i++) {
         const auto auxInt = intExtCounts[i][0];
         const auto auxExt = intExtCounts[i][1];
+
         intExtCounts[i][0] = internalAcumm;
         intExtCounts[i][1] = externalAcumm;
         internalAcumm += auxInt;
         externalAcumm += auxExt;
+        cout << "It " << i << " internal " << auxInt << " external " << auxExt
+             << " intAcumm " << internalAcumm << " extAcumm " << externalAcumm
+             << endl;
       }
+      internalEdges.clear();
+      externalEdges.clear();
       internalEdges.resize(internalAcumm);
       externalEdges.resize(externalAcumm);
+      cout << "internalEdges.size " << internalEdges.size()
+           << " externalEdges.size " << externalEdges.size() << endl;
     } // Implicit omp barrier given by omp single
 
     // 5. Fill output vectors using write offsets
@@ -321,6 +329,8 @@ void classifyEdges(const std::vector<uint64_t> &edges,
 void updateEdgeLists(const SimpleMesh &mesh,
                      std::vector<SimpleEdge> &externalEdges,
                      std::vector<SimpleEdge> &internalEdges) {
+  externalEdges.clear();
+  internalEdges.clear();
 
   // TODO 2.1: Implement the body of the updateEdgeLists() method
   const std::size_t maxEdgeOccurrences = 3 * mesh.triangles.size();
@@ -358,57 +368,59 @@ void updateEdgeLists(const SimpleMesh &mesh,
     }
   };
 
+  auto eraseOne = [](std::vector<unsigned> &vec, unsigned value) {
+    auto it = std::find(vec.begin(), vec.end(), value);
+    if (it != vec.end())
+      vec.erase(it);
+  };
+
   // Build the boundary edge map.
-  std::unordered_map<unsigned, unsigned> edgeMap;
-  edgeMap.reserve(externalEdges.size());
+  std::unordered_map<unsigned, std::vector<unsigned>> edgeMap(
+      externalEdges.size());
 
   for (const auto &exEdge : externalEdges) {
-    auto it = edgeMap.find(exEdge.a);
-
-    if (it != edgeMap.end()) {
-      edgeMap.emplace(exEdge.b, exEdge.a);
-      updateMin(exEdge.b);
-    } else {
-      edgeMap.emplace(exEdge.a, exEdge.b);
-      updateMin(exEdge.a);
-    }
+    edgeMap[exEdge.a].push_back(exEdge.b);
+    edgeMap[exEdge.b].push_back(exEdge.a);
+    updateMin(exEdge.a);
+    updateMin(exEdge.b);
   }
 
   // Order external edges into boundary loops.
   unsigned currVertex = minVertex;
+  for (std::size_t i = 0; i < externalEdges.size(); i++) {
+    auto itCur = edgeMap.find(currVertex);
 
-  while (!edgeMap.empty()) {
-    auto it = edgeMap.find(currVertex);
+    if (itCur == edgeMap.end() || itCur->second.empty()) {
+      // New loop, find new minimum
+      minPos = vec3(INFINITY, INFINITY, INFINITY);
 
-    if (it == edgeMap.end()) {
-      // Start a new boundary loop.
-      minPos.set(INFINITY, INFINITY, INFINITY);
-      minVertex = static_cast<unsigned>(-1);
-
+      bool found = false;
       for (const auto &entry : edgeMap) {
-        updateMin(entry.first);
+        if (!entry.second.empty()) {
+          updateMin(entry.first);
+          found = true;
+        }
       }
-
-      if (minVertex == static_cast<unsigned>(-1)) {
-        break;
-      }
+      if (!found)
+        break; // Just in case
 
       currVertex = minVertex;
-      it = edgeMap.find(currVertex);
-
-      if (it == edgeMap.end()) {
-        throw "Invalid boundary edge map";
-      }
+      itCur = edgeMap.find(currVertex);
     }
 
-    const unsigned nextVertex = it->second;
+    // Get next vertex.
+    unsigned next = itCur->second.back();
+    itCur->second.pop_back();
 
-    externalEdges.push_back(SimpleEdge(currVertex, nextVertex));
+    // Remove the reverse edge from next.
+    auto itNext = edgeMap.find(next);
+    if (itNext != edgeMap.end())
+      eraseOne(itNext->second, currVertex);
 
-    edgeMap.erase(it);
-    currVertex = nextVertex;
+    // Save current edge
+    externalEdges[i] = SimpleEdge(currVertex, next);
+    currVertex = next;
   }
-
   // END TODO 2.1
 }
 
