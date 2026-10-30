@@ -26,6 +26,7 @@
 #include <sys/types.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #ifdef _MSC_VER
 #pragma warning(error : 4101)
 #endif
@@ -199,16 +200,11 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
         intExtCounts[i][1] = externalAcumm;
         internalAcumm += auxInt;
         externalAcumm += auxExt;
-        cout << "It " << i << " internal " << auxInt << " external " << auxExt
-             << " intAcumm " << internalAcumm << " extAcumm " << externalAcumm
-             << endl;
       }
       internalEdges.clear();
       externalEdges.clear();
       internalEdges.resize(internalAcumm);
       externalEdges.resize(externalAcumm);
-      cout << "internalEdges.size " << internalEdges.size()
-           << " externalEdges.size " << externalEdges.size() << endl;
     } // Implicit omp barrier given by omp single
 
     // 5. Fill output vectors using write offsets
@@ -497,44 +493,39 @@ int main(int argc, char *argv[]) {
     // boundDist vector. Store in deepestVertex the index of the vertex with
     // the maximum distance to boundary
 
-    boundDist.assign(mesh.numVertex(), INFINITY);
+    const unsigned n = mesh.numVertex();
+    boundDist.assign(n, INFINITY);
 
-    // Build adjacency matrix to construct graph
+    uint maxVtxValence = 10; // TODO: Fit it with the update edges function
 
-    // Adjacency matrix: adj[vertexA][conexionIdx] = std::pair(vertexB,
-    // distance(vertexA,vertexB)) Conexion vector is sparse and not ordered =>
-    // must iterate fully for query
-    std::vector<std::vector<std::pair<unsigned, double>>> adj(mesh.numVertex());
+    // 1. Build adjacency matrix
+    std::vector<std::vector<std::pair<unsigned, double>>> adj(n);
+    for (auto &v : adj)
+      v.resize(maxVtxValence);
 
-    auto addEdge = [&](const SimpleEdge &e) {
-      double w = mesh.edgeLength(e);
+#pragma omp parallel shared(internalEdges, adj)
+    {
+      const int tid = omp_get_thread_num();
+      const int numThreads = omp_get_num_threads();
 
-      adj[e.a].push_back({e.b, w});
-      adj[e.b].push_back({e.a, w});
-    };
+      // Start and finish index, thread secuential
+      const std::size_t begin = n * tid / numThreads;
+      const std::size_t end = n * (tid + 1) / numThreads;
+      std::size_t it = begin;
+    }
 
-    for (const auto &e : externalEdges)
-      addEdge(e);
+    constexpr int NUM_BUCKETS = 4;
+    double delta = 1.0;
+    double B_max[NUM_BUCKETS] = {0, 0.5 * delta, delta, 2 * delta};
+    std::vector<uint32_t> B[NUM_BUCKETS];
+    for (auto &b : B)
+      b.resize(n); // TODO: Optimze later
 
-    for (const auto &e : internalEdges)
-      addEdge(e);
-
-    using qItem = std::pair<unsigned, double>;
-
-    struct ComparePairInQueue {
-      bool operator()(const qItem &lhs, const qItem &rhs) const {
-        return lhs.second > rhs.second;
-      }
-    };
-
-    std::priority_queue<qItem, std::vector<qItem>, ComparePairInQueue> queue;
-
-    // Add source nodes
-    for (auto &edge : externalEdges) {
-      if (boundDist[edge.a] > 0.0) {
-        boundDist[edge.a] = 0.0;
-        queue.push({edge.a, 0.0});
-      }
+    // 1. Add source nodes
+#pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < externalEdges.size(); i++) {
+      unsigned aVtx = externalEdges[i].a;
+      boundDist[aVtx] = 0.0;
     }
 
     // Dijkstras
