@@ -155,12 +155,12 @@ void parallelRadixSortEdges(std::vector<uint64_t> &edges) {
         // Insertion sort by the low 22 bits.
         // All elements share 'a' (prefix), so comparing full 64-bit == comparing 'b'.
         // Adapted from https://en.wikipedia.org/wiki/Insertion_sort pseudocode
-        for (std::size_t k = it + 1; k < gEnd; ++k) {
+        for (std::size_t k = it + 1; k < gEnd; k++) {
           const uint64_t v = edges[k];
           std::size_t j = k;
           while (j > it && edges[j - 1] > v) {
             edges[j] = edges[j - 1];
-            j++;
+            j--;
           }
           edges[j] = v;
         }
