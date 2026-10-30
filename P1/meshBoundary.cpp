@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <queue>
+#include <sys/types.h>
 #include <unordered_map>
 #include <unordered_set>
 #ifdef _MSC_VER
@@ -37,76 +38,265 @@
 #include <iostream>
 using namespace std::chrono;
 
-/// Update the contents of externalEdges and internalEdges
-void updateEdgeLists(const SimpleMesh &mesh,
-                     std::vector<SimpleEdge> &externalEdges,
-                     std::vector<SimpleEdge> &internalEdges) {
-  // TODO 2.1: Implement the body of the updateEdgeLists() method
+#include <omp.h>
 
-  struct SimpleEdgeHash {
-    std::size_t operator()(const SimpleEdge &e) const noexcept {
-      const std::uint32_t lo = std::min(e.a, e.b);
-      const std::uint32_t hi = std::max(e.a, e.b);
+// Mesh with the most vertex is Venus3000 with 1.5M vertex
+// 22 bits to store an index => 44 bits per edge => 11bit radix sort is optimal
+inline uint64_t edge64bit(uint32_t a, uint32_t b) {
+  return a < b ? (uint64_t(a) << 22) | b : (uint64_t(b) << 22) | a;
+}
 
-      return static_cast<std::size_t>((static_cast<std::uint64_t>(lo) << 32) |
-                                      hi);
+inline SimpleEdge bitToEdge(uint64_t bits) {
+  return SimpleEdge(bits >> 22, bits & 0x3FFFFF);
+}
+
+void parallelRadixSortEdges(std::vector<uint64_t> &edges) {
+  const std::size_t n = edges.size();
+
+  constexpr int RADIX_BITS = 11; // 11bit radix sort, optimal for 44bit edge
+  constexpr int RADIX = 1 << RADIX_BITS; // 2048
+  constexpr int RADIX_MASK = RADIX - 1;
+  constexpr int PASSES = 2; // Sort only top vertex 22->32, 32->43
+
+  const int maxThreads = omp_get_max_threads();
+
+  // One histogram set and offset set per thread
+  std::vector<std::array<uint32_t, RADIX>> hist(maxThreads);
+  std::vector<std::array<uint32_t, RADIX>> offsets(maxThreads);
+
+  // Sracth buffer
+  std::vector<uint64_t> buffer(n);
+
+#pragma omp parallel shared(hist, offsets)
+  {
+    const int tid = omp_get_thread_num();
+    const int numThreads = omp_get_num_threads();
+
+    // Start and finish index, thread secuential
+    const std::size_t begin = n * tid / numThreads;
+    const std::size_t end = n * (tid + 1) / numThreads;
+
+    bool isPassEven = true;
+
+    for (int pass = 0; pass < PASSES; ++pass) {
+      uint64_t *src = isPassEven ? edges.data() : buffer.data();
+      uint64_t *dst = isPassEven ? buffer.data() : edges.data();
+
+      const int shift = 22 + pass * RADIX_BITS; // 22, 33
+
+      // Reset histogram
+      auto &localHist = hist[tid];
+      localHist.fill(0);
+
+      // 1. Count frecuency
+      for (std::size_t i = begin; i < end; ++i) {
+        const unsigned bucket =
+            static_cast<unsigned>((src[i] >> shift) & RADIX_MASK);
+
+        localHist[bucket]++;
+      }
+
+#pragma omp barrier
+
+      // 2. Compute global offsets. Element wise sum of all histograms
+      // One thread only, secuential job
+#pragma omp single
+      {
+        std::size_t bucketBase = 0;
+
+        for (int bucket = 0; bucket < RADIX; ++bucket) {
+          std::size_t pos = bucketBase;
+
+          for (int t = 0; t < numThreads; ++t) {
+            offsets[t][bucket] = pos;
+            pos += hist[t][bucket];
+          }
+
+          bucketBase = pos;
+        }
+      }
+
+      // 3. Stable distribution from src to dst using global offsets
+      auto next = offsets[tid];
+
+      for (std::size_t i = begin; i < end; ++i) {
+        const unsigned bucket =
+            static_cast<unsigned>((src[i] >> shift) & RADIX_MASK);
+
+        dst[next[bucket]++] = src[i];
+      }
+
+      // 4. Swap src with dst
+      isPassEven = !isPassEven;
+
+#pragma omp barrier
     }
-  };
 
-  struct SimpleEdgeEqual {
-    bool operator()(const SimpleEdge &lhs,
-                    const SimpleEdge &rhs) const noexcept {
-      return (lhs.a == rhs.a && lhs.b == rhs.b) ||
-             (lhs.a == rhs.b && lhs.b == rhs.a);
-    }
-  };
+    // Insertion sort for lower 22 bit, 4 to 8 edges per vertex => cheap
+    {
+      std::size_t it = begin;
 
-  // Count how many times each undirected edge appears:
-  // 1 -> external edge
-  // 2 -> internal edge
-  // >2 -> non-manifold mesh
-  std::unordered_map<SimpleEdge, unsigned char, SimpleEdgeHash, SimpleEdgeEqual>
-      edgeCounts;
+      // Skip the first group, it belongs to previous thread, unless its the start
+      if (it > 0 && (edges[it] >> 22) == (edges[it - 1] >> 22)) {
+        const uint64_t a = edges[it] >> 22;
+        while (it < end && (edges[it] >> 22) == a)
+          it++;
+      }
 
-  const std::size_t maxEdgeOccurrences = 3 * mesh.triangles.size();
-  edgeCounts.reserve(maxEdgeOccurrences);
+      // Sort the groups
+      while (it < end) {
+        // Prefix
+        const uint64_t a = edges[it] >> 22;
+        // Get group size
+        std::size_t gEnd = it + 1;
+        while (gEnd < n && (edges[gEnd] >> 22) == a)
+          gEnd++;
 
-  uint32_t numInternalEdges = 0;
-
-  for (const auto &tri : mesh.triangles) {
-    for (const auto &edge : tri.edges()) {
-      auto it = edgeCounts.find(edge);
-
-      if (it == edgeCounts.end()) {
-        edgeCounts.emplace(edge, 1);
-      } else {
-        if (it->second == 2) {
-          throw "TODO 2.1 IMPOSIBLE: Input mesh is not a manifold";
+        // Insertion sort by the low 22 bits.
+        // All elements share 'a' (prefix), so comparing full 64-bit == comparing 'b'.
+        // Adapted from https://en.wikipedia.org/wiki/Insertion_sort pseudocode
+        for (std::size_t k = it + 1; k < gEnd; ++k) {
+          const uint64_t v = edges[k];
+          std::size_t j = k;
+          while (j > it && edges[j - 1] > v) {
+            edges[j] = edges[j - 1];
+            j++;
+          }
+          edges[j] = v;
         }
 
-        it->second++;
-        numInternalEdges++;
+        it = gEnd;
       }
     }
   }
 
-  externalEdges.clear();
-  internalEdges.clear();
+  // Just in case num of passes is odd
+  if (PASSES % 2 != 0) {
+    std::copy(buffer.begin(), buffer.end(), edges.begin());
+  }
+}
 
-  externalEdges.reserve(maxEdgeOccurrences - numInternalEdges);
-  internalEdges.reserve(numInternalEdges);
+void classifyEdges(const std::vector<uint64_t> &edges,
+                   std::vector<SimpleEdge> &externalEdges,
+                   std::vector<SimpleEdge> &internalEdges) {
 
-  // Separate external and internal edges.
-  for (const auto &entry : edgeCounts) {
-    const SimpleEdge &edge = entry.first;
-    const unsigned char count = entry.second;
+  const std::size_t n = edges.size();
+  const int maxThreads = omp_get_max_threads();
 
-    if (count == 1) {
-      externalEdges.push_back(edge);
-    } else {
-      internalEdges.push_back(edge);
+  std::vector<uint8_t> isUnique(n, 0); // True if is an internal edge
+  std::vector<std::pair<uint, uint>> offsets(
+      maxThreads,
+      std::pair<uint, uint>(0, 0)); // First = internal, second = external
+
+#pragma omp parallel shared(edges, externalEdges, internalEdges, isUnique,     \
+                                offsets)
+  {
+    const int tid = omp_get_thread_num();
+    const int numThreads = omp_get_num_threads();
+
+    // Start and finish index, thread secuential
+    const std::size_t begin = n * tid / numThreads;
+    const std::size_t end = n * (tid + 1) / numThreads;
+    std::size_t it = begin;
+
+    // Pair counting
+    while (it + 1 < end) {
+      if (edges[it] == edges[it + 1]) {
+        it += 2;
+      } else {
+        isUnique[it] = true;
+        offsets[tid].second++;
+        it++;
+      }
+    }
+
+    // Start block ammend
+    if (begin > 0 && isUnique[begin] && (edges[begin] == edges[begin - 1])) {
+      isUnique[begin] = false;
+      offsets[tid].second--;
+    }
+
+    // End block ammend
+    if (it < end && (tid == numThreads - 1 || edges[it] != edges[end])) {
+      isUnique[it] = true;
+      offsets[tid].second++;
+    }
+
+    // Get internal offset using number of external edges in section
+    offsets[tid].first = end - begin - offsets[tid].second;
+
+#pragma omp barrier
+
+    // Compute global offsets
+#pragma omp single
+    {
+      std::size_t internalAcumm = 0;
+      std::size_t externalAcumm = 0;
+      for (int i = 0; i < omp_get_num_threads(); i++) {
+        auto aux = offsets[i];
+        offsets[i].first = internalAcumm;
+        offsets[i].second = externalAcumm;
+        internalAcumm += aux.first;
+        externalAcumm += aux.second;
+      }
+
+      // Resize to total edge count
+      internalEdges.resize(internalAcumm);
+      externalEdges.resize(externalAcumm);
+    }
+
+#pragma omp barrier
+
+    // Fill vectors with edges
+    {
+      const int tid = omp_get_thread_num();
+      const int numThreads = omp_get_num_threads();
+
+      // Start and finish index, thread secuential
+      const std::size_t begin = n * tid / numThreads;
+      const std::size_t end = n * (tid + 1) / numThreads;
+      std::size_t it = begin;
+
+      while (it < end) {
+        if (isUnique[it]) {
+          externalEdges[offsets[tid].second++] = bitToEdge(edges[it]);
+          it++;
+        } else {
+          internalEdges[offsets[tid].first++] = bitToEdge(edges[it]);
+          it += 2;
+        }
+      }
     }
   }
+}
+
+/// Update the contents of externalEdges and internalEdges
+void updateEdgeLists(const SimpleMesh &mesh,
+                     std::vector<SimpleEdge> &externalEdges,
+                     std::vector<SimpleEdge> &internalEdges) {
+
+  // TODO 2.1: Implement the body of the updateEdgeLists() method
+  const std::size_t maxEdgeOccurrences = 3 * mesh.triangles.size();
+
+  // Get all edges
+  std::vector<uint64_t> edges(maxEdgeOccurrences);
+#pragma omp parallel for schedule(static)
+  for (std::size_t i = 0; i < mesh.triangles.size(); ++i) {
+    const auto &tri = mesh.triangles[i];
+
+    const std::size_t j = 3 * i;
+
+    edges[j] = edge64bit(tri.a, tri.b);
+    edges[j + 1] = edge64bit(tri.b, tri.c);
+    edges[j + 2] = edge64bit(tri.c, tri.a);
+  }
+
+  // Radix sort
+  parallelRadixSortEdges(edges);
+  cout << "DONE" << endl;
+
+  // Count non duplicates for boundary
+  classifyEdges(edges, externalEdges, internalEdges);
 
   // Find the smallest vertex on the boundary.
   vec3 minPos(INFINITY, INFINITY, INFINITY);
@@ -246,8 +436,8 @@ int main(int argc, char *argv[]) {
     // TODO 2.2:
     // Compute the distance from each vertex to the nearest vertex in the
     // boundary (euclidean distance measured along edges) and store it in the
-    // boundDist vector. Store in deepestVertex the index of the vertex with the
-    // maximum distance to boundary
+    // boundDist vector. Store in deepestVertex the index of the vertex with
+    // the maximum distance to boundary
 
     boundDist.assign(mesh.numVertex(), INFINITY);
 
@@ -352,9 +542,10 @@ int main(int argc, char *argv[]) {
     cout << "Saving output to " << outputFilename << endl;
 
     // TODO 2.3:
-    // Create a color mesh where the color of each vertex shows its distance to
-    // boundary Save the color mesh to a PLY file named "output_boundary.ply"
-    // See meshColor.cpp or meshColor2.cpp to see an how-to example
+    // Create a color mesh where the color of each vertex shows its distance
+    // to boundary Save the color mesh to a PLY file named
+    // "output_boundary.ply" See meshColor.cpp or meshColor2.cpp to see an
+    // how-to example
 
     ColorMesh outputMesh;
     outputMesh.coordinates = mesh.coordinates;
@@ -382,9 +573,9 @@ int main(int argc, char *argv[]) {
     // (x86)\\VCG\\MeshLab\\meshlab.exe\"";
     string viewcmd = "C:/meshlab/meshlab_32.exe";
 #else
-    string viewcmd =
-        "/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=meshlab "
-        "--file-forwarding net.meshlab.MeshLab >/dev/null 2>&1 ";
+    string viewcmd = "/usr/bin/flatpak run --branch=stable --arch=x86_64 "
+                     "--command=meshlab "
+                     "--file-forwarding net.meshlab.MeshLab >/dev/null 2>&1 ";
 #endif
     string cmd = viewcmd + " " + outputFilename;
     cout << "Executing external command: " << cmd << endl;
