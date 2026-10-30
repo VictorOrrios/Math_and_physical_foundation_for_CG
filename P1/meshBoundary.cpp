@@ -47,114 +47,111 @@ inline uint64_t edge64bit(uint32_t a, uint32_t b) {
 }
 
 inline SimpleEdge bitToEdge(uint64_t bits) {
+  bits &= 0x7FFFFFFFFFFFULL; // Clean unique edge bit flag
   return SimpleEdge(bits >> 22, bits & 0x3FFFFF);
 }
 
-void parallelRadixSortEdges(std::vector<uint64_t> &edges) {
+void sortAndClassifyEdges(std::vector<uint64_t> &edges,
+                          std::vector<SimpleEdge> &externalEdges,
+                          std::vector<SimpleEdge> &internalEdges) {
   const std::size_t n = edges.size();
 
-  constexpr int RADIX_BITS = 11; // 11bit radix sort, optimal for 44bit edge
-  constexpr int RADIX = 1 << RADIX_BITS; // 2048
+  // Radix sort params, 11bit 2 pases
+  constexpr int RADIX_BITS = 11;
+  constexpr int RADIX = 1 << RADIX_BITS;
   constexpr int RADIX_MASK = RADIX - 1;
-  constexpr int PASSES = 2; // Sort only top vertex 22->32, 32->43
+  constexpr int PASSES = 2;
+
+  // Unique edge bit flag
+  // Used instead of bool/bit vector for less memory and better cache
+  constexpr uint64_t UNIQUE_EDGE_BIT_MASK = 0x8000000000000000ULL;
 
   const int maxThreads = omp_get_max_threads();
 
-  // One histogram set and offset set per thread
-  std::vector<std::array<uint32_t, RADIX>> hist(maxThreads);
-  std::vector<std::array<uint32_t, RADIX>> offsets(maxThreads);
-
-  // Sracth buffer
+  // Scratch buffer. We use a stable MSD radix sort implementation
   std::vector<uint64_t> buffer(n);
+  // Frecuency histogram
+  std::vector<std::array<uint32_t, RADIX>> hist(maxThreads);
+  // Pass copy global offsets
+  std::vector<std::array<uint32_t, RADIX>> offsets(maxThreads);
+  // Count to resize output vectors. [0] = internal [1] = external
+  std::vector<std::array<uint32_t, 2>> intExtCounts(maxThreads, {0, 0});
 
-#pragma omp parallel shared(hist, offsets)
+#pragma omp parallel shared(hist, offsets, externalEdges, internalEdges,       \
+                                intExtCounts)
   {
     const int tid = omp_get_thread_num();
     const int numThreads = omp_get_num_threads();
 
-    // Start and finish index, thread secuential
     const std::size_t begin = n * tid / numThreads;
     const std::size_t end = n * (tid + 1) / numThreads;
 
+    // Ping pong buffer flag
     bool isPassEven = true;
 
+    // 1. Radix sort by bits 22 to 43 (lower index in an edge)
     for (int pass = 0; pass < PASSES; ++pass) {
       uint64_t *src = isPassEven ? edges.data() : buffer.data();
       uint64_t *dst = isPassEven ? buffer.data() : edges.data();
+      const int shift = 22 + pass * RADIX_BITS; // Start at bit 22
 
-      const int shift = 22 + pass * RADIX_BITS; // 22, 33
-
-      // Reset histogram
       auto &localHist = hist[tid];
       localHist.fill(0);
 
-      // 1. Count frecuency
-      for (std::size_t i = begin; i < end; ++i) {
-        const unsigned bucket =
-            static_cast<unsigned>((src[i] >> shift) & RADIX_MASK);
+      // 1.a. Frecuency counting
+      for (std::size_t i = begin; i < end; ++i)
+        localHist[(src[i] >> shift) & RADIX_MASK]++;
 
-        localHist[bucket]++;
-      }
-
+      // 1.b. Compute offsets
 #pragma omp barrier
-
-      // 2. Compute global offsets. Element wise sum of all histograms
-      // One thread only, secuential job
 #pragma omp single
       {
         std::size_t bucketBase = 0;
-
         for (int bucket = 0; bucket < RADIX; ++bucket) {
           std::size_t pos = bucketBase;
-
           for (int t = 0; t < numThreads; ++t) {
             offsets[t][bucket] = pos;
             pos += hist[t][bucket];
           }
-
           bucketBase = pos;
         }
-      }
+      } // Implicit omp barrier given by omp single
 
-      // 3. Stable distribution from src to dst using global offsets
+      // 1.c. Copy from ping to pong buffer
       auto next = offsets[tid];
+      for (std::size_t i = begin; i < end; ++i)
+        dst[next[(src[i] >> shift) & RADIX_MASK]++] = src[i];
 
-      for (std::size_t i = begin; i < end; ++i) {
-        const unsigned bucket =
-            static_cast<unsigned>((src[i] >> shift) & RADIX_MASK);
-
-        dst[next[bucket]++] = src[i];
-      }
-
-      // 4. Swap src with dst
+      // Ping pong swap
       isPassEven = !isPassEven;
-
 #pragma omp barrier
     }
 
-    // Insertion sort for lower 22 bit, 4 to 8 edges per vertex => cheap
+    // 2. Skip first group in thread block range
+    std::size_t skipStart = begin;
+    if (skipStart > 0 &&
+        (edges[skipStart] >> 22) == (edges[skipStart - 1] >> 22)) {
+      const uint64_t a = edges[skipStart] >> 22;
+      while (skipStart < end && (edges[skipStart] >> 22) == a)
+        skipStart++;
+    }
+
+    // 3. Sort + Mark + Count. One pass
     {
-      std::size_t it = begin;
+      std::size_t it = skipStart;
+      uint32_t localExt = 0;
 
-      // Skip the first group, it belongs to previous thread, unless its the start
-      if (it > 0 && (edges[it] >> 22) == (edges[it - 1] >> 22)) {
-        const uint64_t a = edges[it] >> 22;
-        while (it < end && (edges[it] >> 22) == a)
-          it++;
-      }
-
-      // Sort the groups
       while (it < end) {
-        // Prefix
+        // 3.a. Get edge group range
         const uint64_t a = edges[it] >> 22;
-        // Get group size
         std::size_t gEnd = it + 1;
         while (gEnd < n && (edges[gEnd] >> 22) == a)
           gEnd++;
 
-        // Insertion sort by the low 22 bits.
-        // All elements share 'a' (prefix), so comparing full 64-bit == comparing 'b'.
+        // 3.b. Insertion sort the lower 22 bit
         // Adapted from https://en.wikipedia.org/wiki/Insertion_sort pseudocode
+        // Note: Since the higher 22 bit are already sorted direct comparison
+        // w/o bitwise AND is optimal
         for (std::size_t k = it + 1; k < gEnd; k++) {
           const uint64_t v = edges[k];
           std::size_t j = k;
@@ -165,14 +162,64 @@ void parallelRadixSortEdges(std::vector<uint64_t> &edges) {
           edges[j] = v;
         }
 
+        // 3.c. Mark unique edges with bit flag and count the number of edges
+        // marked
+        std::size_t p = it;
+        while (p < gEnd) {
+          if (edges[p] != edges[p + 1]) {
+            edges[p] |= UNIQUE_EDGE_BIT_MASK;
+            localExt++;
+            p++;
+          } else {
+            p += 2;
+          }
+        }
+
         it = gEnd;
       }
-    }
-  }
 
-  // Just in case num of passes is odd
-  if (PASSES % 2 != 0) {
-    std::copy(buffer.begin(), buffer.end(), edges.begin());
+      // Record counts, compute internal count using total visited - external
+      // marked
+      intExtCounts[tid][0] = it - skipStart - localExt;
+      intExtCounts[tid][1] = localExt;
+    }
+
+    // 4. Compute output vector sizes and acummulate thread write offsets
+#pragma omp barrier
+#pragma omp single
+    {
+      std::size_t internalAcumm = 0;
+      std::size_t externalAcumm = 0;
+      // Acummulate and write
+      for (int i = 0; i < numThreads; i++) {
+        const auto auxInt = intExtCounts[i][0];
+        const auto auxExt = intExtCounts[i][1];
+        intExtCounts[i][0] = internalAcumm;
+        intExtCounts[i][1] = externalAcumm;
+        internalAcumm += auxInt;
+        externalAcumm += auxExt;
+      }
+      internalEdges.resize(internalAcumm);
+      externalEdges.resize(externalAcumm);
+    } // Implicit omp barrier given by omp single
+
+    // 5. Fill output vectors using write offsets
+    {
+      std::size_t it = skipStart;
+      uint32_t extOff = intExtCounts[tid][1];
+      uint32_t intOff = intExtCounts[tid][0];
+
+      // Use bit flag to now next edge to visit
+      while (it < end) {
+        if (edges[it] & UNIQUE_EDGE_BIT_MASK) {
+          externalEdges[extOff++] = bitToEdge(edges[it]);
+          it++;
+        } else {
+          internalEdges[intOff++] = bitToEdge(edges[it]);
+          it += 2;
+        }
+      }
+    }
   }
 }
 
@@ -292,11 +339,10 @@ void updateEdgeLists(const SimpleMesh &mesh,
   }
 
   // Radix sort
-  parallelRadixSortEdges(edges);
-  cout << "DONE" << endl;
+  sortAndClassifyEdges(edges, externalEdges, internalEdges);
 
   // Count non duplicates for boundary
-  classifyEdges(edges, externalEdges, internalEdges);
+  // classifyEdges(edges, externalEdges, internalEdges);
 
   // Find the smallest vertex on the boundary.
   vec3 minPos(INFINITY, INFINITY, INFINITY);
