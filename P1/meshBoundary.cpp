@@ -20,6 +20,7 @@
  */
 
 #include "ColorMesh.hpp"
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <queue>
@@ -47,25 +48,24 @@ inline uint64_t edge64bit(uint32_t a, uint32_t b) {
   return a < b ? (uint64_t(a) << 22) | b : (uint64_t(b) << 22) | a;
 }
 
+inline uint64_t edge64bitWIdxEncoding(uint32_t idx, uint32_t a, uint32_t b) {
+  return ((uint64_t(idx) << 44)) | (uint64_t(a) << 22) | b;
+}
+
 inline SimpleEdge bitToEdge(uint64_t bits) {
   bits &= 0x7FFFFFFFFFFFULL; // Clean unique edge bit flag
   return SimpleEdge(bits >> 22, bits & 0x3FFFFF);
 }
 
-void sortAndClassifyEdges(std::vector<uint64_t> &edges,
-                          std::vector<SimpleEdge> &externalEdges,
-                          std::vector<SimpleEdge> &internalEdges) {
-  const std::size_t n = edges.size();
-
-  // Radix sort params, 11bit 2 pases
+inline void parallelRadixSort11bit(std::vector<uint64_t> &data, int startBit,
+                                   int numPasses) {
   constexpr int RADIX_BITS = 11;
-  constexpr int RADIX = 1 << RADIX_BITS;
+  constexpr int RADIX = 1 << RADIX_BITS; // 2048
   constexpr int RADIX_MASK = RADIX - 1;
-  constexpr int PASSES = 2;
 
-  // Unique edge bit flag
-  // Used instead of bool/bit vector for less memory and better cache
-  constexpr uint64_t UNIQUE_EDGE_BIT_MASK = 0x8000000000000000ULL;
+  const std::size_t n = data.size();
+  if (n == 0 || numPasses <= 0)
+    return;
 
   const int maxThreads = omp_get_max_threads();
 
@@ -75,11 +75,8 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
   std::vector<std::array<uint32_t, RADIX>> hist(maxThreads);
   // Pass copy global offsets
   std::vector<std::array<uint32_t, RADIX>> offsets(maxThreads);
-  // Count to resize output vectors. [0] = internal [1] = external
-  std::vector<std::array<uint32_t, 2>> intExtCounts(maxThreads, {0, 0});
 
-#pragma omp parallel shared(hist, offsets, externalEdges, internalEdges,       \
-                                intExtCounts)
+#pragma omp parallel shared(hist, offsets)
   {
     const int tid = omp_get_thread_num();
     const int numThreads = omp_get_num_threads();
@@ -90,20 +87,18 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
     // Ping pong buffer flag
     bool isPassEven = true;
 
-    // 1. Radix sort by bits 22 to 43 (lower index in an edge)
-    for (int pass = 0; pass < PASSES; ++pass) {
-      uint64_t *src = isPassEven ? edges.data() : buffer.data();
-      uint64_t *dst = isPassEven ? buffer.data() : edges.data();
-      const int shift = 22 + pass * RADIX_BITS; // Start at bit 22
+    for (int pass = 0; pass < numPasses; ++pass) {
+      uint64_t *src = isPassEven ? data.data() : buffer.data();
+      uint64_t *dst = isPassEven ? buffer.data() : data.data();
+      const int shift = startBit + pass * RADIX_BITS;
 
+      // (a) Frecuency counting
       auto &localHist = hist[tid];
       localHist.fill(0);
-
-      // 1.a. Frecuency counting
       for (std::size_t i = begin; i < end; ++i)
         localHist[(src[i] >> shift) & RADIX_MASK]++;
 
-      // 1.b. Compute offsets
+      // (b) Compute offsets (exclusive scan)
 #pragma omp barrier
 #pragma omp single
       {
@@ -116,17 +111,50 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
           }
           bucketBase = pos;
         }
-      } // Implicit omp barrier given by omp single
+      } // Implicit barrier
 
-      // 1.c. Copy from ping to pong buffer
+      // (c) Stable scatter
       auto next = offsets[tid];
       for (std::size_t i = begin; i < end; ++i)
         dst[next[(src[i] >> shift) & RADIX_MASK]++] = src[i];
 
-      // Ping pong swap
+      // Flip ping pong
       isPassEven = !isPassEven;
 #pragma omp barrier
     }
+
+    // Just in case num of passes is odd
+    if (!isPassEven) {
+      for (std::size_t i = begin; i < end; ++i)
+        data[i] = buffer[i];
+    }
+  }
+}
+
+void sortAndClassifyEdges(std::vector<uint64_t> &edges,
+                          std::vector<SimpleEdge> &externalEdges,
+                          std::vector<SimpleEdge> &internalEdges) {
+  const std::size_t n = edges.size();
+
+  // 1. Radix sort by bits 22 to 43 (lower index in an edge)
+  parallelRadixSort11bit(edges, 22, 2);
+
+  // Unique edge bit flag
+  // Used instead of bool/bit vector for less memory and better cache
+  constexpr uint64_t UNIQUE_EDGE_BIT_MASK = 0x8000000000000000ULL;
+
+  const int maxThreads = omp_get_max_threads();
+
+  // Count to resize output vectors. [0] = internal [1] = external
+  std::vector<std::array<uint32_t, 2>> intExtCounts(maxThreads, {0, 0});
+
+#pragma omp parallel shared(externalEdges, internalEdges, intExtCounts)
+  {
+    const int tid = omp_get_thread_num();
+    const int numThreads = omp_get_num_threads();
+
+    const std::size_t begin = n * tid / numThreads;
+    const std::size_t end = n * (tid + 1) / numThreads;
 
     // 2. Skip first group in thread block range
     std::size_t skipStart = begin;
@@ -494,158 +522,265 @@ int main(int argc, char *argv[]) {
     // the maximum distance to boundary
 
     const unsigned n = mesh.numVertex();
+    const unsigned m = internalEdges.size();
     boundDist.assign(n, INFINITY);
 
-    uint maxVtxValence = 10; // TODO: Fit it with the update edges function
+    const uint MAX_VTX_VALENCE = 10;
 
-    // 1. Build adjacency matrix
-    std::vector<std::vector<std::pair<unsigned, double>>> adj(n);
-    for (auto &v : adj)
-      v.resize(maxVtxValence);
+    // 1. Compute edge weights
+    std::vector<float> weight(m);
+#pragma omp parallel for schedule(static)
+    for (int i = 0; i < m; i++) {
+      weight[i] = mesh.distance(internalEdges[i].a, internalEdges[i].b);
+    }
 
-#pragma omp parallel shared(internalEdges, adj)
+    // 2. Build adjacency matrix
+    struct WEdge {
+      uint32_t index;
+      float weight;
+    };
+    std::vector<uint8_t> valence(n);
+    std::vector<uint8_t> valenceAux(n, 0);
+    std::vector<std::array<WEdge, MAX_VTX_VALENCE>> adj(n);
+
+    std::vector<uint64_t> inverseEdge(m);
+
+    // 2.a. First pass: Direct fill wirh internal edges
+#pragma omp parallel shared(internalEdges, valence, adj)
     {
       const int tid = omp_get_thread_num();
       const int numThreads = omp_get_num_threads();
 
       // Start and finish index, thread secuential
-      const std::size_t begin = n * tid / numThreads;
-      const std::size_t end = n * (tid + 1) / numThreads;
-      std::size_t it = begin;
-    }
+      const std::size_t begin = m * tid / numThreads;
+      const std::size_t end = m * (tid + 1) / numThreads;
 
-    constexpr int NUM_BUCKETS = 4;
-    double delta = 1.0;
-    double B_max[NUM_BUCKETS] = {0, 0.5 * delta, delta, 2 * delta};
-    std::vector<uint32_t> B[NUM_BUCKETS];
-    for (auto &b : B)
-      b.resize(n); // TODO: Optimze later
+      {
+        // 2.a.1 Skip start the first group
+        std::size_t skipStart = begin;
+        if (skipStart > 0 &&
+            internalEdges[skipStart].a == internalEdges[skipStart - 1].a) {
+          const uint64_t a = internalEdges[skipStart].a;
+          while (skipStart < end && internalEdges[skipStart].a == a)
+            skipStart++;
+        }
 
-    // 1. Add source nodes
-#pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < externalEdges.size(); i++) {
-      unsigned aVtx = externalEdges[i].a;
-      boundDist[aVtx] = 0.0;
-    }
+        std::size_t it = skipStart;
+        while (it < end) {
+          // 2.a.2. Find group size
+          const uint64_t a = internalEdges[it].a;
+          std::size_t gEnd = it + 1;
+          while (gEnd < m && internalEdges[gEnd].a == a)
+            gEnd++;
 
-    // Dijkstras
-    while (!queue.empty()) {
-      const qItem item = queue.top();
-      queue.pop();
+          // 2.a.3 Fill direct edge conexxions
+          for (size_t k = it; k < gEnd; ++k) {
+            unsigned b = internalEdges[k].b;
+            // Update weight
+            adj[a][valence[a]] = {.index = uint32_t(b), .weight = weight[k]};
+            // Cretae 64bit inverse edge with adj index encoding
+            inverseEdge[k] = edge64bitWIdxEncoding(valence[a], b, a);
+            // Update valence on both vertex
+            valence[a]++;
+#pragma omp atomic update
+            valenceAux[b]++;
+          }
 
-      if (boundDist[item.first] < item.second)
-        continue;
+          // Batch update on current thread vertex
+#pragma omp atomic update
+          valenceAux[a] += gEnd-it;
 
-      for (auto &conexion : adj[item.first]) {
-        double newDist = conexion.second + item.second;
-        if (boundDist[conexion.first] > newDist) {
-          boundDist[conexion.first] = newDist;
-          queue.push({conexion.first, newDist});
+          it = gEnd;
         }
       }
     }
 
-    double maxDist = boundDist[0];
-    for (size_t i = 0; i < boundDist.size(); i++) {
-      double d = boundDist[i];
-      if (d > maxDist) {
-        maxDist = d;
-        deepestVertex = i;
+    // 2.b. Radix sort the inverse edges
+    parallelRadixSort11bit(inverseEdge, 22, 2);
+
+// 2.c. Second pass: Indirect fill with inverse internal edges
+#pragma omp parallel shared(inverseEdge, valence, adj)
+    {
+      constexpr uint64_t BIT_MASK_22 = 0x3FFFFF;
+
+      const int tid = omp_get_thread_num();
+      const int numThreads = omp_get_num_threads();
+
+      // Start and finish index, thread secuential
+      const std::size_t begin = m * tid / numThreads;
+      const std::size_t end = m * (tid + 1) / numThreads;
+
+      {
+        // 2.c.1 Skip start the first group
+        std::size_t skipStart = begin;
+        if (skipStart > 0 &&
+            ((inverseEdge[skipStart] >> 22) & BIT_MASK_22) ==
+                ((inverseEdge[skipStart - 1] >> 22) & BIT_MASK_22)) {
+          const uint64_t a = ((inverseEdge[skipStart] >> 22) & BIT_MASK_22);
+          while (skipStart < end &&
+                 ((inverseEdge[skipStart] >> 22) & BIT_MASK_22) == a)
+            skipStart++;
+        }
+
+        std::size_t it = skipStart;
+        while (it < end) {
+          // 2.c.2. Find group size
+          const uint64_t a = (inverseEdge[it] >> 22) & BIT_MASK_22;
+          uint8_t totalValence = valenceAux[a];
+          std::size_t gEnd = it + totalValence;
+
+          // 2.c.3 Fill direct edge conexxions
+          for (int k = it; k < gEnd; k++) {
+            uint32_t index = uint32_t((inverseEdge[k] >> 44) & 0x3FFFFF);
+            uint32_t b = uint32_t(inverseEdge[k] & 0x3FFFFF);
+            float weight = adj[b][index].weight;
+            adj[a][valence[a]++] = {.index = b, .weight = weight};
+          }
+
+          it = gEnd;
+        }
       }
     }
+  }
 
-    if (maxDist == INFINITY) {
-      cout << "meshBoundary IMPOSIBLE: No frontier found, fatal error" << endl;
-      return 1;
+  /*
+
+  constexpr int NUM_BUCKETS = 4;
+  double delta = 1.0;
+  double B_max[NUM_BUCKETS] = {0, 0.5 * delta, delta, 2 * delta};
+  std::vector<uint32_t> B[NUM_BUCKETS];
+  for (auto &b : B)
+    b.resize(n); // TODO: Optimze later
+
+  // 1. Add source nodes
+#pragma omp parallel for schedule(static)
+  for (size_t i = 0; i < externalEdges.size(); i++) {
+    unsigned aVtx = externalEdges[i].a;
+    boundDist[aVtx] = 0.0;
+  }
+
+  // Dijkstras
+  while (!queue.empty()) {
+    const qItem item = queue.top();
+    queue.pop();
+
+    if (boundDist[item.first] < item.second)
+      continue;
+
+    for (auto &conexion : adj[item.first]) {
+      double newDist = conexion.second + item.second;
+      if (boundDist[conexion.first] > newDist) {
+        boundDist[conexion.first] = newDist;
+        queue.push({conexion.first, newDist});
+      }
     }
+  }
 
-    // END TODO 2.2
-    cout << "Done boundDist() "
-         << duration<float>(high_resolution_clock::now() - clock0).count()
-         << " seconds" << endl;
-
-    // Dump the index and distance for the deepestVertex
-    cout << "maxDistance to boundary: " << boundDist[deepestVertex]
-         << " at vertex: " << deepestVertex << endl;
-
-    // Dump distances to boundary (for small meshes) for debugging
-    if (boundDist.size() < 40) {
-      cout << "Distances to boundary: " << endl;
-      for (size_t i = 0; i < boundDist.size(); i++)
-        cout << "vertex: " << i << " : " << boundDist[i] << endl;
-      cout << endl;
+  double maxDist = boundDist[0];
+  for (size_t i = 0; i < boundDist.size(); i++) {
+    double d = boundDist[i];
+    if (d > maxDist) {
+      maxDist = d;
+      deepestVertex = i;
     }
+  }
 
-    /* Dump path from deepestVertex to nearest boundary vertex
-    cout << "Shortest path from " << deepestVertex<< " to boundary:" << endl;
-    int i = deepestVertex;
-    while (i != -1)
-    {
-        cout << i << " -> ";
-        i = parent[i];
-    }
+  if (maxDist == INFINITY) {
+    cout << "meshBoundary IMPOSIBLE: No frontier found, fatal error" << endl;
+    return 1;
+  }
+  */
+
+  // END TODO 2.2
+  cout << "Done boundDist() "
+       << duration<float>(high_resolution_clock::now() - clock0).count()
+       << " seconds" << endl;
+
+  // Dump the index and distance for the deepestVertex
+  cout << "maxDistance to boundary: " << boundDist[deepestVertex]
+       << " at vertex: " << deepestVertex << endl;
+
+  // Dump distances to boundary (for small meshes) for debugging
+  if (boundDist.size() < 40) {
+    cout << "Distances to boundary: " << endl;
+    for (size_t i = 0; i < boundDist.size(); i++)
+      cout << "vertex: " << i << " : " << boundDist[i] << endl;
     cout << endl;
-    //Dump path */
-
-    std::string outputFilename = "output_boundary.ply";
-    cout << "Saving output to " << outputFilename << endl;
-
-    // TODO 2.3:
-    // Create a color mesh where the color of each vertex shows its distance
-    // to boundary Save the color mesh to a PLY file named
-    // "output_boundary.ply" See meshColor.cpp or meshColor2.cpp to see an
-    // how-to example
-
-    ColorMesh outputMesh;
-    outputMesh.coordinates = mesh.coordinates;
-    outputMesh.triangles = mesh.triangles;
-    outputMesh.colors.resize(mesh.numVertex());
-
-    // Iterate over the vertex of the mesh and set the color
-    // of each vertex using its boundDistance
-    for (size_t i = 0; i < mesh.numVertex(); i++) {
-      outputMesh.colors[i].setTemperature(float(maxDist - boundDist[i]), 0,
-                                          float(maxDist));
-    }
-
-    // Save result to a file in .ply format
-    outputMesh.writeFilePLY(outputFilename);
-
-    // END TODO 2.3
-    cout << "Done colorize by distance to boundary "
-         << duration<float>(high_resolution_clock::now() - clock0).count()
-         << " seconds" << endl;
-
-    // Visualize the file with an external viewer
-#ifdef WIN32
-    // string viewcmd = "\"C:\\Program Files
-    // (x86)\\VCG\\MeshLab\\meshlab.exe\"";
-    string viewcmd = "C:/meshlab/meshlab_32.exe";
-#else
-    string viewcmd = "/usr/bin/flatpak run --branch=stable --arch=x86_64 "
-                     "--command=meshlab "
-                     "--file-forwarding net.meshlab.MeshLab >/dev/null 2>&1 ";
-#endif
-    string cmd = viewcmd + " " + outputFilename;
-    cout << "Executing external command: " << cmd << endl;
-    return system(cmd.c_str());
   }
 
-  catch (const string &str) {
-    std::cerr << "EXCEPTION: " << str << std::endl;
-  } catch (const char *str) {
-    std::cerr << "EXCEPTION: " << str << std::endl;
-  } catch (std::exception &e) {
-    std::cerr << "EXCEPTION: " << e.what() << std::endl;
-  } catch (...) {
-    std::cerr << "EXCEPTION (unknow)" << std::endl;
+  /* Dump path from deepestVertex to nearest boundary vertex
+  cout << "Shortest path from " << deepestVertex<< " to boundary:" << endl;
+  int i = deepestVertex;
+  while (i != -1)
+  {
+      cout << i << " -> ";
+      i = parent[i];
+  }
+  cout << endl;
+  //Dump path */
+
+  std::string outputFilename = "output_boundary.ply";
+  cout << "Saving output to " << outputFilename << endl;
+
+  // TODO 2.3:
+  // Create a color mesh where the color of each vertex shows its distance
+  // to boundary Save the color mesh to a PLY file named
+  // "output_boundary.ply" See meshColor.cpp or meshColor2.cpp to see an
+  // how-to example
+
+  ColorMesh outputMesh;
+  outputMesh.coordinates = mesh.coordinates;
+  outputMesh.triangles = mesh.triangles;
+  outputMesh.colors.resize(mesh.numVertex());
+
+  // Iterate over the vertex of the mesh and set the color
+  // of each vertex using its boundDistance
+  for (size_t i = 0; i < mesh.numVertex(); i++) {
+    outputMesh.colors[i].setTemperature(float(maxDist - boundDist[i]), 0,
+                                        float(maxDist));
   }
 
+  // Save result to a file in .ply format
+  outputMesh.writeFilePLY(outputFilename);
+
+  // END TODO 2.3
+  cout << "Done colorize by distance to boundary "
+       << duration<float>(high_resolution_clock::now() - clock0).count()
+       << " seconds" << endl;
+
+  // Visualize the file with an external viewer
 #ifdef WIN32
-  cout << "Press Return to end the program" << endl;
-  cin.get();
+  // string viewcmd = "\"C:\\Program Files
+  // (x86)\\VCG\\MeshLab\\meshlab.exe\"";
+  string viewcmd = "C:/meshlab/meshlab_32.exe";
+#else
+  string viewcmd = "/usr/bin/flatpak run --branch=stable --arch=x86_64 "
+                   "--command=meshlab "
+                   "--file-forwarding net.meshlab.MeshLab >/dev/null 2>&1 ";
+#endif
+  string cmd = viewcmd + " " + outputFilename;
+  cout << "Executing external command: " << cmd << endl;
+  return system(cmd.c_str());
+}
+
+catch (const string &str) {
+  std::cerr << "EXCEPTION: " << str << std::endl;
+}
+catch (const char *str) {
+  std::cerr << "EXCEPTION: " << str << std::endl;
+}
+catch (std::exception &e) {
+  std::cerr << "EXCEPTION: " << e.what() << std::endl;
+}
+catch (...) {
+  std::cerr << "EXCEPTION (unknow)" << std::endl;
+}
+
+#ifdef WIN32
+cout << "Press Return to end the program" << endl;
+cin.get();
 #else
 #endif
 
-  return 0;
+return 0;
 }
