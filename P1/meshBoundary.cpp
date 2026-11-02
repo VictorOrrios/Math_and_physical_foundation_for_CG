@@ -525,12 +525,12 @@ int main(int argc, char *argv[]) {
     const unsigned m = internalEdges.size();
     boundDist.assign(n, INFINITY);
 
-    const uint MAX_VTX_VALENCE = 10;
+    const uint MAX_VTX_VALENCE = 12;
 
     // 1. Compute edge weights
     std::vector<float> weight(m);
 #pragma omp parallel for schedule(static)
-    for (int i = 0; i < m; i++) {
+    for (size_t i = 0; i < m; i++) {
       weight[i] = mesh.distance(internalEdges[i].a, internalEdges[i].b);
     }
 
@@ -540,7 +540,6 @@ int main(int argc, char *argv[]) {
       float weight;
     };
     std::vector<uint8_t> valence(n);
-    std::vector<uint8_t> valenceAux(n, 0);
     std::vector<std::array<WEdge, MAX_VTX_VALENCE>> adj(n);
 
     std::vector<uint64_t> inverseEdge(m);
@@ -582,13 +581,7 @@ int main(int argc, char *argv[]) {
             inverseEdge[k] = edge64bitWIdxEncoding(valence[a], b, a);
             // Update valence on both vertex
             valence[a]++;
-#pragma omp atomic update
-            valenceAux[b]++;
           }
-
-          // Batch update on current thread vertex
-#pragma omp atomic update
-          valenceAux[a] += gEnd-it;
 
           it = gEnd;
         }
@@ -626,12 +619,13 @@ int main(int argc, char *argv[]) {
         while (it < end) {
           // 2.c.2. Find group size
           const uint64_t a = (inverseEdge[it] >> 22) & BIT_MASK_22;
-          uint8_t totalValence = valenceAux[a];
-          std::size_t gEnd = it + totalValence;
+          std::size_t gEnd = it + 1;
+          while (gEnd < m && ((inverseEdge[gEnd] >> 22) & BIT_MASK_22) == a)
+            gEnd++;
 
           // 2.c.3 Fill direct edge conexxions
-          for (int k = it; k < gEnd; k++) {
-            uint32_t index = uint32_t((inverseEdge[k] >> 44) & 0x3FFFFF);
+          for (size_t k = it; k < gEnd; k++) {
+            uint32_t index = uint32_t(inverseEdge[k] >> 44);
             uint32_t b = uint32_t(inverseEdge[k] & 0x3FFFFF);
             float weight = adj[b][index].weight;
             adj[a][valence[a]++] = {.index = b, .weight = weight};
@@ -641,146 +635,142 @@ int main(int argc, char *argv[]) {
         }
       }
     }
-  }
 
-  /*
 
-  constexpr int NUM_BUCKETS = 4;
-  double delta = 1.0;
-  double B_max[NUM_BUCKETS] = {0, 0.5 * delta, delta, 2 * delta};
-  std::vector<uint32_t> B[NUM_BUCKETS];
-  for (auto &b : B)
-    b.resize(n); // TODO: Optimze later
+    struct CompareEdgeInQueue {
+      bool operator()(const WEdge &lhs, const WEdge &rhs) const {
+        return lhs.weight > rhs.weight;
+      }
+    };
 
-  // 1. Add source nodes
-#pragma omp parallel for schedule(static)
-  for (size_t i = 0; i < externalEdges.size(); i++) {
-    unsigned aVtx = externalEdges[i].a;
-    boundDist[aVtx] = 0.0;
-  }
+    std::priority_queue<WEdge, std::vector<WEdge>, CompareEdgeInQueue> queue;
 
-  // Dijkstras
-  while (!queue.empty()) {
-    const qItem item = queue.top();
-    queue.pop();
+    for (size_t i = 0; i < externalEdges.size(); i++) {
+      unsigned aVtx = externalEdges[i].a;
+      boundDist[aVtx] = 0.0;
+      queue.push({aVtx,0.0});
+    }
 
-    if (boundDist[item.first] < item.second)
-      continue;
+    // Dijkstras
+    while (!queue.empty()) {
+      const WEdge item = queue.top();
+      queue.pop();
+      //cout<<"Pop: "<<item.index<<" "<<item.weight<<endl;
 
-    for (auto &conexion : adj[item.first]) {
-      double newDist = conexion.second + item.second;
-      if (boundDist[conexion.first] > newDist) {
-        boundDist[conexion.first] = newDist;
-        queue.push({conexion.first, newDist});
+      if (boundDist[item.index] < item.weight)
+        continue;
+
+      for (size_t k = 0; k < valence[item.index]; k++) {
+        auto &conexion = adj[item.index][k];
+        float newDist = conexion.weight + item.weight;
+        if (boundDist[conexion.index] > newDist) {
+          boundDist[conexion.index] = newDist;
+          queue.push({conexion.index, newDist});
+        }
       }
     }
-  }
 
-  double maxDist = boundDist[0];
-  for (size_t i = 0; i < boundDist.size(); i++) {
-    double d = boundDist[i];
-    if (d > maxDist) {
-      maxDist = d;
-      deepestVertex = i;
+    float maxDist = -1.0;
+    for (size_t i = 0; i < boundDist.size(); i++) {
+      float d = boundDist[i];
+      if (d > maxDist) {
+        maxDist = d;
+        deepestVertex = i;
+      }
     }
-  }
 
-  if (maxDist == INFINITY) {
-    cout << "meshBoundary IMPOSIBLE: No frontier found, fatal error" << endl;
-    return 1;
-  }
-  */
+    if (maxDist == INFINITY) {
+      cout << "meshBoundary IMPOSIBLE: No frontier found, fatal error" << endl;
+      return 1;
+    }
 
-  // END TODO 2.2
-  cout << "Done boundDist() "
-       << duration<float>(high_resolution_clock::now() - clock0).count()
-       << " seconds" << endl;
+    // END TODO 2.2
+    cout << "Done boundDist() "
+         << duration<float>(high_resolution_clock::now() - clock0).count()
+         << " seconds" << endl;
 
-  // Dump the index and distance for the deepestVertex
-  cout << "maxDistance to boundary: " << boundDist[deepestVertex]
-       << " at vertex: " << deepestVertex << endl;
+    // Dump the index and distance for the deepestVertex
+    cout << "maxDistance to boundary: " << boundDist[deepestVertex]
+         << " at vertex: " << deepestVertex << endl;
 
-  // Dump distances to boundary (for small meshes) for debugging
-  if (boundDist.size() < 40) {
-    cout << "Distances to boundary: " << endl;
-    for (size_t i = 0; i < boundDist.size(); i++)
-      cout << "vertex: " << i << " : " << boundDist[i] << endl;
+    // Dump distances to boundary (for small meshes) for debugging
+    if (boundDist.size() < 40) {
+      cout << "Distances to boundary: " << endl;
+      for (size_t i = 0; i < boundDist.size(); i++)
+        cout << "vertex: " << i << " : " << boundDist[i] << endl;
+      cout << endl;
+    }
+
+    /* Dump path from deepestVertex to nearest boundary vertex
+    cout << "Shortest path from " << deepestVertex<< " to boundary:" << endl;
+    int i = deepestVertex;
+    while (i != -1)
+    {
+        cout << i << " -> ";
+        i = parent[i];
+    }
     cout << endl;
-  }
+    //Dump path */
 
-  /* Dump path from deepestVertex to nearest boundary vertex
-  cout << "Shortest path from " << deepestVertex<< " to boundary:" << endl;
-  int i = deepestVertex;
-  while (i != -1)
-  {
-      cout << i << " -> ";
-      i = parent[i];
-  }
-  cout << endl;
-  //Dump path */
+    std::string outputFilename = "output_boundary.ply";
+    cout << "Saving output to " << outputFilename << endl;
 
-  std::string outputFilename = "output_boundary.ply";
-  cout << "Saving output to " << outputFilename << endl;
+    // TODO 2.3:
+    // Create a color mesh where the color of each vertex shows its distance
+    // to boundary Save the color mesh to a PLY file named
+    // "output_boundary.ply" See meshColor.cpp or meshColor2.cpp to see an
+    // how-to example
 
-  // TODO 2.3:
-  // Create a color mesh where the color of each vertex shows its distance
-  // to boundary Save the color mesh to a PLY file named
-  // "output_boundary.ply" See meshColor.cpp or meshColor2.cpp to see an
-  // how-to example
+    ColorMesh outputMesh;
+    outputMesh.coordinates = mesh.coordinates;
+    outputMesh.triangles = mesh.triangles;
+    outputMesh.colors.resize(mesh.numVertex());
 
-  ColorMesh outputMesh;
-  outputMesh.coordinates = mesh.coordinates;
-  outputMesh.triangles = mesh.triangles;
-  outputMesh.colors.resize(mesh.numVertex());
+    // Iterate over the vertex of the mesh and set the color
+    // of each vertex using its boundDistance
+    for (size_t i = 0; i < mesh.numVertex(); i++) {
+      outputMesh.colors[i].setTemperature(float(maxDist - boundDist[i]), 0,
+                                          float(maxDist));
+    }
 
-  // Iterate over the vertex of the mesh and set the color
-  // of each vertex using its boundDistance
-  for (size_t i = 0; i < mesh.numVertex(); i++) {
-    outputMesh.colors[i].setTemperature(float(maxDist - boundDist[i]), 0,
-                                        float(maxDist));
-  }
+    // Save result to a file in .ply format
+    outputMesh.writeFilePLY(outputFilename);
 
-  // Save result to a file in .ply format
-  outputMesh.writeFilePLY(outputFilename);
+    // END TODO 2.3
+    cout << "Done colorize by distance to boundary "
+         << duration<float>(high_resolution_clock::now() - clock0).count()
+         << " seconds" << endl;
 
-  // END TODO 2.3
-  cout << "Done colorize by distance to boundary "
-       << duration<float>(high_resolution_clock::now() - clock0).count()
-       << " seconds" << endl;
-
-  // Visualize the file with an external viewer
+    // Visualize the file with an external viewer
 #ifdef WIN32
-  // string viewcmd = "\"C:\\Program Files
-  // (x86)\\VCG\\MeshLab\\meshlab.exe\"";
-  string viewcmd = "C:/meshlab/meshlab_32.exe";
+    // string viewcmd = "\"C:\\Program Files
+    // (x86)\\VCG\\MeshLab\\meshlab.exe\"";
+    string viewcmd = "C:/meshlab/meshlab_32.exe";
 #else
-  string viewcmd = "/usr/bin/flatpak run --branch=stable --arch=x86_64 "
-                   "--command=meshlab "
-                   "--file-forwarding net.meshlab.MeshLab >/dev/null 2>&1 ";
+    string viewcmd = "/usr/bin/flatpak run --branch=stable --arch=x86_64 "
+                     "--command=meshlab "
+                     "--file-forwarding net.meshlab.MeshLab >/dev/null 2>&1 ";
 #endif
-  string cmd = viewcmd + " " + outputFilename;
-  cout << "Executing external command: " << cmd << endl;
-  return system(cmd.c_str());
-}
+    string cmd = viewcmd + " " + outputFilename;
+    cout << "Executing external command: " << cmd << endl;
+    return system(cmd.c_str());
+  }
 
-catch (const string &str) {
-  std::cerr << "EXCEPTION: " << str << std::endl;
-}
-catch (const char *str) {
-  std::cerr << "EXCEPTION: " << str << std::endl;
-}
-catch (std::exception &e) {
-  std::cerr << "EXCEPTION: " << e.what() << std::endl;
-}
-catch (...) {
-  std::cerr << "EXCEPTION (unknow)" << std::endl;
-}
+  catch (const string &str) {
+    std::cerr << "EXCEPTION: " << str << std::endl;
+  } catch (const char *str) {
+    std::cerr << "EXCEPTION: " << str << std::endl;
+  } catch (std::exception &e) {
+    std::cerr << "EXCEPTION: " << e.what() << std::endl;
+  } catch (...) {
+    std::cerr << "EXCEPTION (unknow)" << std::endl;
+  }
 
 #ifdef WIN32
-cout << "Press Return to end the program" << endl;
-cin.get();
+  cout << "Press Return to end the program" << endl;
+  cin.get();
 #else
 #endif
 
-return 0;
+  return 0;
 }
