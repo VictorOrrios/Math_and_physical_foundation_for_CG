@@ -623,7 +623,7 @@ int main(int argc, char *argv[]) {
           while (gEnd < m && ((inverseEdge[gEnd] >> 22) & BIT_MASK_22) == a)
             gEnd++;
 
-          // 2.c.3 Fill direct edge conexxions
+          // 2.c.3 Fill direct edge conexions
           for (size_t k = it; k < gEnd; k++) {
             uint32_t index = uint32_t(inverseEdge[k] >> 44);
             uint32_t b = uint32_t(inverseEdge[k] & 0x3FFFFF);
@@ -636,6 +636,7 @@ int main(int argc, char *argv[]) {
       }
     }
 
+    /*
 
     struct CompareEdgeInQueue {
       bool operator()(const WEdge &lhs, const WEdge &rhs) const {
@@ -648,14 +649,14 @@ int main(int argc, char *argv[]) {
     for (size_t i = 0; i < externalEdges.size(); i++) {
       unsigned aVtx = externalEdges[i].a;
       boundDist[aVtx] = 0.0;
-      queue.push({aVtx,0.0});
+      queue.push({aVtx, 0.0});
     }
 
     // Dijkstras
     while (!queue.empty()) {
       const WEdge item = queue.top();
       queue.pop();
-      //cout<<"Pop: "<<item.index<<" "<<item.weight<<endl;
+      // cout<<"Pop: "<<item.index<<" "<<item.weight<<endl;
 
       if (boundDist[item.index] < item.weight)
         continue;
@@ -670,12 +671,47 @@ int main(int argc, char *argv[]) {
       }
     }
 
-    float maxDist = -1.0;
+    */
+
+    constexpr float DELTA = 0.1f;
+    constexpr int NUM_BUCKETS = 4;
+
+    std::vector<std::vector<uint32_t>> buckets(NUM_BUCKETS);
+    for (auto &b : buckets)
+      b.reserve(100);
+    std::vector<uint32_t> R(100);
+
+#pragma omp parallel for schedule(static)
+    for (size_t i = 0; i < externalEdges.size(); i++) {
+      const uint32_t vtx = externalEdges[i].a;
+
+      if (boundDist[vtx] != 0.0) {
+        boundDist[vtx] = 0.0;
+        buckets[0][i] = vtx;
+      }
+    }
+
+    // Delta stepping
+
+    std::vector<float> tMaxDist(omp_get_max_threads(), -1.0);
+    std::vector<int> tDeepestVertex(omp_get_max_threads(), deepestVertex);
+#pragma omp parallel for schedule(static)
     for (size_t i = 0; i < boundDist.size(); i++) {
       float d = boundDist[i];
+      int tId = omp_get_thread_num();
+      if (d > tMaxDist[tId]) {
+        tMaxDist[tId] = d;
+        tDeepestVertex[tId] = i;
+      }
+    }
+
+    float maxDist = -1.0;
+    int maxThreads = omp_get_max_threads();
+    for (int i = 0; i < maxThreads; i++) {
+      float d = tMaxDist[i];
       if (d > maxDist) {
         maxDist = d;
-        deepestVertex = i;
+        deepestVertex = tDeepestVertex[i];
       }
     }
 
