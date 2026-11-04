@@ -20,7 +20,9 @@
  */
 
 #include "ColorMesh.hpp"
+#include <algorithm>
 #include <array>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <queue>
@@ -195,12 +197,12 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
         // marked
         std::size_t p = it;
         while (p < gEnd) {
-          if (edges[p] != edges[p + 1]) {
+          if (p + 1 < gEnd && edges[p] == edges[p + 1]) {
+            p += 2;
+          } else {
             edges[p] |= UNIQUE_EDGE_BIT_MASK;
             localExt++;
             p++;
-          } else {
-            p += 2;
           }
         }
 
@@ -255,98 +257,35 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
   }
 }
 
-void classifyEdges(const std::vector<uint64_t> &edges,
-                   std::vector<SimpleEdge> &externalEdges,
-                   std::vector<SimpleEdge> &internalEdges) {
+float findMax(unsigned int &deepestVertex,
+              const std::vector<double> boundDist) {
 
-  const std::size_t n = edges.size();
-  const int maxThreads = omp_get_max_threads();
+  const int P = omp_get_max_threads();
 
-  std::vector<uint8_t> isUnique(n, 0); // True if is an internal edge
-  std::vector<std::pair<uint, uint>> offsets(
-      maxThreads,
-      std::pair<uint, uint>(0, 0)); // First = internal, second = external
-
-#pragma omp parallel shared(edges, externalEdges, internalEdges, isUnique,     \
-                                offsets)
-  {
-    const int tid = omp_get_thread_num();
-    const int numThreads = omp_get_num_threads();
-
-    // Start and finish index, thread secuential
-    const std::size_t begin = n * tid / numThreads;
-    const std::size_t end = n * (tid + 1) / numThreads;
-    std::size_t it = begin;
-
-    // Pair counting
-    while (it + 1 < end) {
-      if (edges[it] == edges[it + 1]) {
-        it += 2;
-      } else {
-        isUnique[it] = true;
-        offsets[tid].second++;
-        it++;
-      }
-    }
-
-    // Start block ammend
-    if (begin > 0 && isUnique[begin] && (edges[begin] == edges[begin - 1])) {
-      isUnique[begin] = false;
-      offsets[tid].second--;
-    }
-
-    // End block ammend
-    if (it < end && (tid == numThreads - 1 || edges[it] != edges[end])) {
-      isUnique[it] = true;
-      offsets[tid].second++;
-    }
-
-    // Get internal offset using number of external edges in section
-    offsets[tid].first = end - begin - offsets[tid].second;
-
-#pragma omp barrier
-
-    // Compute global offsets
-#pragma omp single
-    {
-      std::size_t internalAcumm = 0;
-      std::size_t externalAcumm = 0;
-      for (int i = 0; i < omp_get_num_threads(); i++) {
-        auto aux = offsets[i];
-        offsets[i].first = internalAcumm;
-        offsets[i].second = externalAcumm;
-        internalAcumm += aux.first;
-        externalAcumm += aux.second;
-      }
-
-      // Resize to total edge count
-      internalEdges.resize(internalAcumm);
-      externalEdges.resize(externalAcumm);
-    }
-
-#pragma omp barrier
-
-    // Fill vectors with edges
-    {
-      const int tid = omp_get_thread_num();
-      const int numThreads = omp_get_num_threads();
-
-      // Start and finish index, thread secuential
-      const std::size_t begin = n * tid / numThreads;
-      const std::size_t end = n * (tid + 1) / numThreads;
-      std::size_t it = begin;
-
-      while (it < end) {
-        if (isUnique[it]) {
-          externalEdges[offsets[tid].second++] = bitToEdge(edges[it]);
-          it++;
-        } else {
-          internalEdges[offsets[tid].first++] = bitToEdge(edges[it]);
-          it += 2;
-        }
-      }
+  // Find max by section
+  std::vector<float> tMaxDist(P, -1.0);
+  std::vector<int> tDeepestVertex(P, deepestVertex);
+#pragma omp parallel for schedule(static)
+  for (size_t i = 0; i < boundDist.size(); i++) {
+    float d = boundDist[i];
+    int tId = omp_get_thread_num();
+    if (d > tMaxDist[tId]) {
+      tMaxDist[tId] = d;
+      tDeepestVertex[tId] = i;
     }
   }
+
+  // Find max of all sections
+  float maxDist = -1.f;
+  for (int i = 0; i < P; i++) {
+    float d = tMaxDist[i];
+    if (d > maxDist) {
+      maxDist = d;
+      deepestVertex = tDeepestVertex[i];
+    }
+  }
+
+  return maxDist;
 }
 
 /// Update the contents of externalEdges and internalEdges
@@ -374,9 +313,6 @@ void updateEdgeLists(const SimpleMesh &mesh,
 
   // Radix sort
   sortAndClassifyEdges(edges, externalEdges, internalEdges);
-
-  // Count non duplicates for boundary
-  // classifyEdges(edges, externalEdges, internalEdges);
 
   // Find the smallest vertex on the boundary.
   vec3 minPos(INFINITY, INFINITY, INFINITY);
@@ -521,16 +457,22 @@ int main(int argc, char *argv[]) {
     // boundDist vector. Store in deepestVertex the index of the vertex with
     // the maximum distance to boundary
 
-    const unsigned n = mesh.numVertex();
-    const unsigned m = internalEdges.size();
-    boundDist.assign(n, INFINITY);
+    float DELTA = 0.3f;
+    constexpr uint MAX_VTX_VALENCE = 20;
+    constexpr int NUM_BUCKETS = 4;
+    constexpr int BUCKET_SIZE = 100;
+    constexpr int REQUEST_SIZE = 300;
+    constexpr int IND_GROUP_SIZE = 64;
+    const unsigned N = mesh.numVertex();
+    const unsigned M = internalEdges.size();
+    const int P = omp_get_max_threads();
 
-    const uint MAX_VTX_VALENCE = 12;
+    boundDist.assign(N, INFINITY);
 
     // 1. Compute edge weights
-    std::vector<float> weight(m);
+    std::vector<float> weight(M);
 #pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < m; i++) {
+    for (size_t i = 0; i < M; i++) {
       weight[i] = mesh.distance(internalEdges[i].a, internalEdges[i].b);
     }
 
@@ -539,20 +481,24 @@ int main(int argc, char *argv[]) {
       uint32_t index;
       float weight;
     };
-    std::vector<uint8_t> valence(n);
-    std::vector<std::array<WEdge, MAX_VTX_VALENCE>> adj(n);
+    struct adjNode {
+      uint8_t numLightEdges = 0;
+      uint8_t valence = 0;
+      std::array<WEdge, MAX_VTX_VALENCE> edges;
+    };
+    std::vector<adjNode> adj(N);
 
-    std::vector<uint64_t> inverseEdge(m);
+    std::vector<uint64_t> inverseEdge(M);
 
     // 2.a. First pass: Direct fill wirh internal edges
-#pragma omp parallel shared(internalEdges, valence, adj)
+#pragma omp parallel shared(internalEdges, adj)
     {
       const int tid = omp_get_thread_num();
       const int numThreads = omp_get_num_threads();
 
       // Start and finish index, thread secuential
-      const std::size_t begin = m * tid / numThreads;
-      const std::size_t end = m * (tid + 1) / numThreads;
+      const std::size_t begin = M * tid / numThreads;
+      const std::size_t end = M * (tid + 1) / numThreads;
 
       {
         // 2.a.1 Skip start the first group
@@ -569,18 +515,21 @@ int main(int argc, char *argv[]) {
           // 2.a.2. Find group size
           const uint64_t a = internalEdges[it].a;
           std::size_t gEnd = it + 1;
-          while (gEnd < m && internalEdges[gEnd].a == a)
+          while (gEnd < M && internalEdges[gEnd].a == a)
             gEnd++;
 
           // 2.a.3 Fill direct edge conexxions
           for (size_t k = it; k < gEnd; ++k) {
             unsigned b = internalEdges[k].b;
             // Update weight
-            adj[a][valence[a]] = {.index = uint32_t(b), .weight = weight[k]};
+            assert(adj[a].valence < MAX_VTX_VALENCE &&
+                   "======== Mesh execeds MAX_VTX_VALENCE ========");
+            adj[a].edges[adj[a].valence] = {.index = uint32_t(b),
+                                            .weight = weight[k]};
             // Cretae 64bit inverse edge with adj index encoding
-            inverseEdge[k] = edge64bitWIdxEncoding(valence[a], b, a);
+            inverseEdge[k] = edge64bitWIdxEncoding(adj[a].valence, b, a);
             // Update valence on both vertex
-            valence[a]++;
+            adj[a].valence++;
           }
 
           it = gEnd;
@@ -592,16 +541,17 @@ int main(int argc, char *argv[]) {
     parallelRadixSort11bit(inverseEdge, 22, 2);
 
 // 2.c. Second pass: Indirect fill with inverse internal edges
-#pragma omp parallel shared(inverseEdge, valence, adj)
+#pragma omp parallel shared(inverseEdge, adj)
     {
       constexpr uint64_t BIT_MASK_22 = 0x3FFFFF;
+      constexpr uint64_t BIT_MASK_44 = 0xFFFFFFFFFFF;
 
       const int tid = omp_get_thread_num();
       const int numThreads = omp_get_num_threads();
 
       // Start and finish index, thread secuential
-      const std::size_t begin = m * tid / numThreads;
-      const std::size_t end = m * (tid + 1) / numThreads;
+      const std::size_t begin = M * tid / numThreads;
+      const std::size_t end = M * (tid + 1) / numThreads;
 
       {
         // 2.c.1 Skip start the first group
@@ -620,15 +570,35 @@ int main(int argc, char *argv[]) {
           // 2.c.2. Find group size
           const uint64_t a = (inverseEdge[it] >> 22) & BIT_MASK_22;
           std::size_t gEnd = it + 1;
-          while (gEnd < m && ((inverseEdge[gEnd] >> 22) & BIT_MASK_22) == a)
+          while (gEnd < M && ((inverseEdge[gEnd] >> 22) & BIT_MASK_22) == a)
             gEnd++;
 
-          // 2.c.3 Fill direct edge conexions
+          // 2.c.3 Fill direct edge conexions, remove encoded index and add
+          // light edge counter
           for (size_t k = it; k < gEnd; k++) {
             uint32_t index = uint32_t(inverseEdge[k] >> 44);
             uint32_t b = uint32_t(inverseEdge[k] & 0x3FFFFF);
-            float weight = adj[b][index].weight;
-            adj[a][valence[a]++] = {.index = b, .weight = weight};
+            float weight = adj[b].edges[index].weight;
+            assert(adj[a].valence < MAX_VTX_VALENCE &&
+                   "======== Mesh execeds MAX_VTX_VALENCE ========");
+            adj[a].edges[adj[a].valence++] = {.index = b, .weight = weight};
+
+            inverseEdge[k] &= BIT_MASK_44; // First 44 bits
+
+            if (weight < DELTA) {
+              adj[a].numLightEdges++;
+            }
+          }
+
+          // 2.c.4 Insertion sort
+          for (std::size_t k = 1; k < adj[a].valence; k++) {
+            const uint64_t v = adj[a].edges[k].index;
+            std::size_t j = k;
+            while (j > it && adj[a].edges[j - 1].index > v) {
+              adj[a].edges[j].index = adj[a].edges[j - 1].index;
+              j--;
+            }
+            adj[a].edges[j].index = v;
           }
 
           it = gEnd;
@@ -637,7 +607,6 @@ int main(int argc, char *argv[]) {
     }
 
     /*
-
     struct CompareEdgeInQueue {
       bool operator()(const WEdge &lhs, const WEdge &rhs) const {
         return lhs.weight > rhs.weight;
@@ -661,8 +630,9 @@ int main(int argc, char *argv[]) {
       if (boundDist[item.index] < item.weight)
         continue;
 
-      for (size_t k = 0; k < valence[item.index]; k++) {
-        auto &conexion = adj[item.index][k];
+      uint8_t valence = adj[item.index].valence;
+      for (size_t k = 0; k < valence; k++) {
+        auto &conexion = adj[item.index].edges[k];
         float newDist = conexion.weight + item.weight;
         if (boundDist[conexion.index] > newDist) {
           boundDist[conexion.index] = newDist;
@@ -673,47 +643,163 @@ int main(int argc, char *argv[]) {
 
     */
 
-    constexpr float DELTA = 0.1f;
-    constexpr int NUM_BUCKETS = 4;
-
-    std::vector<std::vector<uint32_t>> buckets(NUM_BUCKETS);
-    for (auto &b : buckets)
-      b.reserve(100);
-    std::vector<uint32_t> R(100);
-
-#pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < externalEdges.size(); i++) {
-      const uint32_t vtx = externalEdges[i].a;
-
-      if (boundDist[vtx] != 0.0) {
-        boundDist[vtx] = 0.0;
-        buckets[0][i] = vtx;
-      }
-    }
-
     // Delta stepping
+    struct Request {
+      uint32_t vertex;
+      float weight;
+    };
+    uint smallestBucket = 0;
+    std::vector<uint> smallestBucketT(P, NUM_BUCKETS);
 
-    std::vector<float> tMaxDist(omp_get_max_threads(), -1.0);
-    std::vector<int> tDeepestVertex(omp_get_max_threads(), deepestVertex);
-#pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < boundDist.size(); i++) {
-      float d = boundDist[i];
-      int tId = omp_get_thread_num();
-      if (d > tMaxDist[tId]) {
-        tMaxDist[tId] = d;
-        tDeepestVertex[tId] = i;
+    std::vector<std::vector<std::vector<uint32_t>>> buckets(P);
+    for (auto &bset : buckets) {
+      bset.resize(NUM_BUCKETS);
+      for (auto &b : bset) {
+        b.reserve(BUCKET_SIZE);
       }
     }
 
-    float maxDist = -1.0;
-    int maxThreads = omp_get_max_threads();
-    for (int i = 0; i < maxThreads; i++) {
-      float d = tMaxDist[i];
-      if (d > maxDist) {
-        maxDist = d;
-        deepestVertex = tDeepestVertex[i];
+    std::vector<std::vector<std::vector<Request>>> req(P);
+    for (auto &rSet : req) {
+      rSet.resize(P);
+      for (auto &rVec : rSet) {
+        rVec.reserve(REQUEST_SIZE);
       }
     }
+
+    std::vector<uint8_t> R(N, 0);
+
+    // Which tId does a vertex index belong to
+    auto ind = [P, N](uint32_t vIdx) -> uint32_t {
+      return static_cast<uint32_t>((static_cast<uint64_t>(vIdx) * P) / N);
+    };
+
+    // Source initialization
+    for (size_t i = 0; i < externalEdges.size(); ++i) {
+      const uint32_t vtx = externalEdges[i].a;
+      boundDist[vtx] = 0.0f;
+      const uint32_t p = ind(vtx);
+      buckets[p][0].push_back(vtx);
+    }
+
+    // Delta-stepping
+#pragma omp parallel num_threads(P)                                            \
+    shared(adj, boundDist, buckets, req, R, smallestBucket, smallestBucketT)
+    {
+      const int tid = omp_get_thread_num();
+      const int numThreads = omp_get_num_threads();
+
+      auto relaxRequests = [&]() {
+        for (int t = 0; t < static_cast<int>(P); t++) {
+          auto &rvec = req[tid][t];
+          for (auto &r : rvec) {
+            if (r.vertex >= N)
+              continue;
+            if (boundDist[r.vertex] <= r.weight)
+              continue; // no better
+            boundDist[r.vertex] = r.weight;
+            int nb = r.weight / DELTA;
+            if (nb >= NUM_BUCKETS)
+              nb = NUM_BUCKETS - 1;
+            buckets[tid][nb].push_back(r.vertex);
+          }
+          rvec.clear();
+        }
+      };
+
+      auto findRequests = [&]() {
+        auto &vec = buckets[tid][smallestBucket];
+        for (auto vtx : vec) {
+          const float w = boundDist[vtx];
+          int bId = w / DELTA;
+          if (bId >= NUM_BUCKETS)
+            bId = NUM_BUCKETS - 1;
+          if (bId != smallestBucket)
+            continue; // stale request
+
+          auto &a = adj[vtx];
+          R[vtx] = 1;
+          for (int i = 0; i < a.numLightEdges; ++i) {
+            auto &c = a.edges[i];
+            int tDst = ind(c.index);
+            req[tDst][tid].push_back({c.index, w + c.weight});
+          }
+        }
+        vec.clear();
+      };
+
+      auto findRequestsinR = [&]() {
+        const uint64_t start = ((tid)*N + P - 1) / P;
+        const uint64_t end = ((tid + 1) * N + P - 1) / P;
+        for (uint64_t ridx = start; ridx < end; ridx++) {
+          if (ridx >= N)
+            break;
+          if (R[ridx] == 0)
+            continue; // Not visited
+          const uint32_t vtx = static_cast<uint32_t>(ridx);
+          const float vtxW = boundDist[vtx];
+          auto &a = adj[vtx];
+          for (int i = static_cast<int>(a.numLightEdges);
+               i < static_cast<int>(a.valence); ++i) {
+            auto &c = a.edges[i];
+            const uint32_t tDst = ind(c.index);
+            req[tDst][tid].push_back(Request{c.index, vtxW + c.weight});
+          }
+        }
+      };
+
+      while (true) {
+        // Get local min bucket
+        smallestBucketT[tid] = NUM_BUCKETS;
+        for (uint b = 0; b < NUM_BUCKETS; ++b) {
+          if (!buckets[tid][b].empty()) {
+            smallestBucketT[tid] = b;
+            break; // el PRIMERO no vacío, no el último
+          }
+        }
+
+#pragma omp barrier
+
+#pragma omp single
+        {
+          // Get global min bucket
+          smallestBucket = NUM_BUCKETS;
+          for (int t = 0; t < numThreads; ++t) {
+            if (smallestBucketT[t] < smallestBucket)
+              smallestBucket = smallestBucketT[t];
+          }
+          // Empty R
+          std::fill(R.begin(), R.end(), 0);
+        }
+#pragma omp barrier
+
+        // If list is done exit
+        if (smallestBucket == NUM_BUCKETS)
+          break;
+
+        // Delta stepping main logic
+        {
+          auto &localB = buckets[tid][smallestBucket];
+          if (!localB.empty()) {
+            findRequests();
+            localB.clear();
+          }
+        }
+#pragma omp barrier
+
+        relaxRequests();
+#pragma omp barrier
+
+        findRequestsinR();
+#pragma omp barrier
+
+        relaxRequests();
+#pragma omp barrier
+      }
+    }
+
+    // Get max distance and deepest vertex
+    float maxDist = findMax(deepestVertex, boundDist);
 
     if (maxDist == INFINITY) {
       cout << "meshBoundary IMPOSIBLE: No frontier found, fatal error" << endl;
