@@ -42,7 +42,21 @@
 #include <iostream>
 using namespace std::chrono;
 
+#include <algorithm>
+#include <atomic>
 #include <omp.h>
+
+constexpr float DELTA = 0.3f;
+constexpr uint MAX_VTX_VALENCE = 20;
+
+struct WeightedEdge {
+  uint32_t index;
+  float weight;
+};
+struct VertexAdj {
+  uint8_t valence = 0;
+  std::array<WeightedEdge, MAX_VTX_VALENCE> edges;
+};
 
 // Mesh with the most vertex is Venus3000 with 1.5M vertex
 // 22 bits to store an index => 44 bits per edge => 11bit radix sort is optimal
@@ -257,34 +271,268 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
   }
 }
 
-float findMax(unsigned int &deepestVertex,
-              const std::vector<double> boundDist) {
+std::vector<VertexAdj> getAdjMatrix(SimpleMesh &mesh,
+                                    std::vector<SimpleEdge> &internalEdges) {
 
-  const int P = omp_get_max_threads();
+  const unsigned N = mesh.numVertex();
+  const unsigned M = internalEdges.size();
 
-  // Find max by section
-  std::vector<float> tMaxDist(P, -1.0);
-  std::vector<int> tDeepestVertex(P, deepestVertex);
+  std::vector<VertexAdj> adj(N);
+
+  // 1. Compute edge weights
+  std::vector<float> weight(M);
 #pragma omp parallel for schedule(static)
-  for (size_t i = 0; i < boundDist.size(); i++) {
-    float d = boundDist[i];
-    int tId = omp_get_thread_num();
-    if (d > tMaxDist[tId]) {
-      tMaxDist[tId] = d;
-      tDeepestVertex[tId] = i;
+  for (size_t i = 0; i < M; i++) {
+    weight[i] = mesh.distance(internalEdges[i].a, internalEdges[i].b);
+  }
+
+  // 2. Build adjacency matrix
+
+  std::vector<uint64_t> inverseEdge(M);
+
+  // 2.a. First pass: Direct fill wirh internal edges
+#pragma omp parallel shared(internalEdges, adj)
+  {
+    const int tid = omp_get_thread_num();
+    const int numThreads = omp_get_num_threads();
+
+    // Start and finish index, thread secuential
+    const std::size_t begin = M * tid / numThreads;
+    const std::size_t end = M * (tid + 1) / numThreads;
+
+    {
+      // 2.a.1 Skip start the first group
+      std::size_t skipStart = begin;
+      if (skipStart > 0 &&
+          internalEdges[skipStart].a == internalEdges[skipStart - 1].a) {
+        const uint64_t a = internalEdges[skipStart].a;
+        while (skipStart < end && internalEdges[skipStart].a == a)
+          skipStart++;
+      }
+
+      std::size_t it = skipStart;
+      while (it < end) {
+        // 2.a.2. Find group size
+        const uint64_t a = internalEdges[it].a;
+        std::size_t gEnd = it + 1;
+        while (gEnd < M && internalEdges[gEnd].a == a)
+          gEnd++;
+
+        // 2.a.3 Fill direct edge conexxions
+        for (size_t k = it; k < gEnd; ++k) {
+          unsigned b = internalEdges[k].b;
+          // Update weight
+          assert(adj[a].valence < MAX_VTX_VALENCE &&
+                 "======== Mesh execeds MAX_VTX_VALENCE ========");
+          adj[a].edges[adj[a].valence] = {.index = uint32_t(b),
+                                          .weight = weight[k]};
+          // Cretae 64bit inverse edge with adj index encoding
+          inverseEdge[k] = edge64bitWIdxEncoding(adj[a].valence, b, a);
+          // Update valence on both vertex
+          adj[a].valence++;
+        }
+
+        it = gEnd;
+      }
     }
   }
 
-  // Find max of all sections
-  float maxDist = -1.f;
-  for (int i = 0; i < P; i++) {
-    float d = tMaxDist[i];
+  // 2.b. Radix sort the inverse edges
+  parallelRadixSort11bit(inverseEdge, 22, 2);
+
+// 2.c. Second pass: Indirect fill with inverse internal edges
+#pragma omp parallel shared(inverseEdge, adj)
+  {
+    constexpr uint64_t BIT_MASK_22 = 0x3FFFFF;
+
+    const int tid = omp_get_thread_num();
+    const int numThreads = omp_get_num_threads();
+
+    // Start and finish index, thread secuential
+    const std::size_t begin = M * tid / numThreads;
+    const std::size_t end = M * (tid + 1) / numThreads;
+
+    {
+      // 2.c.1 Skip start the first group
+      std::size_t skipStart = begin;
+      if (skipStart > 0 &&
+          ((inverseEdge[skipStart] >> 22) & BIT_MASK_22) ==
+              ((inverseEdge[skipStart - 1] >> 22) & BIT_MASK_22)) {
+        const uint64_t a = ((inverseEdge[skipStart] >> 22) & BIT_MASK_22);
+        while (skipStart < end &&
+               ((inverseEdge[skipStart] >> 22) & BIT_MASK_22) == a)
+          skipStart++;
+      }
+
+      std::size_t it = skipStart;
+      while (it < end) {
+        // 2.c.2. Find group size
+        const uint64_t a = (inverseEdge[it] >> 22) & BIT_MASK_22;
+        std::size_t gEnd = it + 1;
+        while (gEnd < M && ((inverseEdge[gEnd] >> 22) & BIT_MASK_22) == a)
+          gEnd++;
+
+        // 2.c.3 Fill direct edge conexions, remove encoded index and add
+        // light edge counter
+        for (size_t k = it; k < gEnd; k++) {
+          uint32_t index = uint32_t(inverseEdge[k] >> 44);
+          uint32_t b = uint32_t(inverseEdge[k] & 0x3FFFFF);
+          float weight = adj[b].edges[index].weight;
+          assert(adj[a].valence < MAX_VTX_VALENCE &&
+                 "======== Mesh execeds MAX_VTX_VALENCE ========");
+          adj[a].edges[adj[a].valence++] = {.index = b, .weight = weight};
+        }
+
+        it = gEnd;
+      }
+    }
+  }
+
+  return adj;
+}
+
+// Compare and exchange macro
+inline bool cas(std::atomic<float> &x, float old_val, float new_val) {
+  return x.compare_exchange_strong(old_val, new_val);
+}
+
+// Adapted from sbeamer/gapbs/sssp.c
+inline void RelaxEdges(const std::vector<VertexAdj> &adj, uint32_t u,
+                       std::vector<std::atomic<float>> &dist,
+                       std::vector<std::vector<uint32_t>> &local_bins) {
+  const auto &a = adj[u];
+  const float dist_u = dist[u];
+  for (int i = 0; i < a.valence; ++i) {
+    const auto &c = a.edges[i];
+    const uint32_t v = c.index;
+    float old_dist = dist[v];
+    float new_dist = dist_u + c.weight;
+    while (new_dist < old_dist) {
+      if (cas(dist[v], old_dist, new_dist)) {
+        size_t dest_bin = static_cast<size_t>(new_dist / DELTA);
+        if (dest_bin >= local_bins.size())
+          local_bins.resize(dest_bin + 1);
+        local_bins[dest_bin].push_back(v);
+        break;
+      }
+      old_dist = dist[v]; // CAS fail, retry
+    }
+  }
+}
+
+// Adapted from sbeamer/gapbs/sssp.c
+void delta_stepping_mssp(const std::vector<VertexAdj> &adj,
+                         const std::vector<SimpleEdge> &externalEdges,
+                         unsigned N,
+                         std::vector<std::atomic<float>> &boundDist) {
+  const size_t kMaxBin = std::numeric_limits<size_t>::max() / 2;
+  const size_t kBinSizeThreshold = 1000; // Gapbs default value
+
+  // 1. Get total mesh valence for maximum frontier size
+  // Uses reduction(+ : E) to avoid race
+  size_t tot_val = 0;
+#pragma omp parallel for schedule(static) reduction(+ : tot_val)
+  for (std::size_t i = 0; i < adj.size(); ++i)
+    tot_val += static_cast<size_t>(adj[i].valence);
+
+  std::vector<uint32_t> frontier(tot_val, 0);
+
+  // 2. Multisource initialization
+  size_t init_tail = 0;
+  for (const auto &e : externalEdges) {
+    const uint32_t v = e.a;
+    if (boundDist[v] > 0.0f) {
+      boundDist[v] = 0.0f;
+      frontier[init_tail++] = v;
+    }
+  }
+
+  // Two element arrays for double buffering curr=iter&1, next=(iter+1)&1
+  size_t shared_indexes[2] = {0, kMaxBin};
+  size_t frontier_tails[2] = {init_tail, 0};
+
+  // 3. Delta stepping
+#pragma omp parallel
+  {
+    std::vector<std::vector<uint32_t>> local_bins(0);
+    size_t iter = 0;
+
+    // While there is still nodes in the bins to process
+    while (shared_indexes[iter & 1] != kMaxBin) {
+      // Ping pong
+      size_t &curr_bin_index = shared_indexes[iter & 1];
+      size_t &next_bin_index = shared_indexes[(iter + 1) & 1];
+      size_t &curr_frontier_tail = frontier_tails[iter & 1];
+      size_t &next_frontier_tail = frontier_tails[(iter + 1) & 1];
+
+      // Phase A: Process current frontier
+#pragma omp for nowait schedule(dynamic, 64)
+      for (size_t i = 0; i < curr_frontier_tail; ++i) {
+        const uint32_t u = frontier[i];
+        // Lazy filter
+        if (boundDist[u] >= DELTA * static_cast<float>(curr_bin_index))
+          RelaxEdges(adj, u, boundDist, local_bins);
+      }
+
+      // Phase B: Process local small bins
+      while (curr_bin_index < local_bins.size() &&
+             !local_bins[curr_bin_index].empty() &&
+             local_bins[curr_bin_index].size() < kBinSizeThreshold) {
+        auto curr_bin_copy = std::move(local_bins[curr_bin_index]);
+        local_bins[curr_bin_index].resize(0);
+        for (uint32_t u : curr_bin_copy)
+          RelaxEdges(adj, u, boundDist, local_bins);
+      }
+
+      // Phase C: Get next min non empty bin
+      for (size_t i = curr_bin_index; i < local_bins.size(); ++i) {
+        if (!local_bins[i].empty()) {
+#pragma omp critical
+          next_bin_index = std::min(next_bin_index, i);
+          break;
+        }
+      }
+
+#pragma omp barrier
+
+      // Phase D: Reset current bin
+#pragma omp single nowait
+      {
+        curr_bin_index = kMaxBin;
+        curr_frontier_tail = 0;
+      }
+
+      // Phase E: Promote next bin to gobal frontier
+      if (next_bin_index < local_bins.size()) {
+        const size_t sz = local_bins[next_bin_index].size();
+        const size_t copy_start = __sync_fetch_and_add(&next_frontier_tail, sz);
+        std::copy(local_bins[next_bin_index].begin(),
+                  local_bins[next_bin_index].end(),
+                  frontier.begin() + copy_start);
+        local_bins[next_bin_index].clear();
+      }
+
+      ++iter;
+#pragma omp barrier
+    }
+  }
+}
+
+float findMax(unsigned int &deepestVertex,
+              const std::vector<double> &boundDist) {
+  float maxDist = -1.0f;
+  size_t deepestIndex = 0;
+
+#pragma omp parallel for schedule(static) reduction(max : maxDist, deepestIndex)
+  for (size_t i = 0; i < boundDist.size(); ++i) {
+    const float d = static_cast<float>(boundDist[i]);
     if (d > maxDist) {
       maxDist = d;
-      deepestVertex = tDeepestVertex[i];
+      deepestIndex = i;
     }
   }
 
+  deepestVertex = static_cast<unsigned int>(deepestIndex);
   return maxDist;
 }
 
@@ -456,350 +704,78 @@ int main(int argc, char *argv[]) {
     // boundary (euclidean distance measured along edges) and store it in the
     // boundDist vector. Store in deepestVertex the index of the vertex with
     // the maximum distance to boundary
+    using Clock = std::chrono::high_resolution_clock;
+    using TP = Clock::time_point;
 
-    float DELTA = 0.3f;
-    constexpr uint MAX_VTX_VALENCE = 20;
-    constexpr int NUM_BUCKETS = 4;
-    constexpr int BUCKET_SIZE = 100;
-    constexpr int REQUEST_SIZE = 300;
-    constexpr int IND_GROUP_SIZE = 64;
+    auto now = []() { return Clock::now(); };
+    auto us = [](TP a, TP b) -> double {
+      return std::chrono::duration_cast<
+                 std::chrono::duration<double, std::micro>>(b - a)
+          .count();
+    };
+
+    // -----------------------------------------------------------------------
+    TP t0 = now();
     const unsigned N = mesh.numVertex();
-    const unsigned M = internalEdges.size();
-    const int P = omp_get_max_threads();
-
     boundDist.assign(N, INFINITY);
+    TP t1 = now();
 
-    // 1. Compute edge weights
-    std::vector<float> weight(M);
+    // -----------------------------------------------------------------------
+    std::vector<VertexAdj> adj = getAdjMatrix(mesh, internalEdges);
+    TP t2 = now();
+
+    // -----------------------------------------------------------------------
+    std::vector<std::atomic<float>> atomicBoundDist(boundDist.size());
 #pragma omp parallel for schedule(static)
-    for (size_t i = 0; i < M; i++) {
-      weight[i] = mesh.distance(internalEdges[i].a, internalEdges[i].b);
-    }
+    for (std::size_t i = 0; i < boundDist.size(); ++i)
+      atomicBoundDist[i].store(boundDist[i], std::memory_order_relaxed);
+    TP t3 = now();
 
-    // 2. Build adjacency matrix
-    struct WEdge {
-      uint32_t index;
-      float weight;
-    };
-    struct adjNode {
-      uint8_t numLightEdges = 0;
-      uint8_t valence = 0;
-      std::array<WEdge, MAX_VTX_VALENCE> edges;
-    };
-    std::vector<adjNode> adj(N);
+    // -----------------------------------------------------------------------
+    delta_stepping_mssp(adj, externalEdges, N, atomicBoundDist);
+    TP t4 = now();
 
-    std::vector<uint64_t> inverseEdge(M);
+// -----------------------------------------------------------------------
+#pragma omp parallel for schedule(static)
+    for (std::size_t i = 0; i < boundDist.size(); ++i)
+      boundDist[i] = atomicBoundDist[i].load(std::memory_order_relaxed);
+    TP t5 = now();
 
-    // 2.a. First pass: Direct fill wirh internal edges
-#pragma omp parallel shared(internalEdges, adj)
-    {
-      const int tid = omp_get_thread_num();
-      const int numThreads = omp_get_num_threads();
-
-      // Start and finish index, thread secuential
-      const std::size_t begin = M * tid / numThreads;
-      const std::size_t end = M * (tid + 1) / numThreads;
-
-      {
-        // 2.a.1 Skip start the first group
-        std::size_t skipStart = begin;
-        if (skipStart > 0 &&
-            internalEdges[skipStart].a == internalEdges[skipStart - 1].a) {
-          const uint64_t a = internalEdges[skipStart].a;
-          while (skipStart < end && internalEdges[skipStart].a == a)
-            skipStart++;
-        }
-
-        std::size_t it = skipStart;
-        while (it < end) {
-          // 2.a.2. Find group size
-          const uint64_t a = internalEdges[it].a;
-          std::size_t gEnd = it + 1;
-          while (gEnd < M && internalEdges[gEnd].a == a)
-            gEnd++;
-
-          // 2.a.3 Fill direct edge conexxions
-          for (size_t k = it; k < gEnd; ++k) {
-            unsigned b = internalEdges[k].b;
-            // Update weight
-            assert(adj[a].valence < MAX_VTX_VALENCE &&
-                   "======== Mesh execeds MAX_VTX_VALENCE ========");
-            adj[a].edges[adj[a].valence] = {.index = uint32_t(b),
-                                            .weight = weight[k]};
-            // Cretae 64bit inverse edge with adj index encoding
-            inverseEdge[k] = edge64bitWIdxEncoding(adj[a].valence, b, a);
-            // Update valence on both vertex
-            adj[a].valence++;
-          }
-
-          it = gEnd;
-        }
-      }
-    }
-
-    // 2.b. Radix sort the inverse edges
-    parallelRadixSort11bit(inverseEdge, 22, 2);
-
-// 2.c. Second pass: Indirect fill with inverse internal edges
-#pragma omp parallel shared(inverseEdge, adj)
-    {
-      constexpr uint64_t BIT_MASK_22 = 0x3FFFFF;
-      constexpr uint64_t BIT_MASK_44 = 0xFFFFFFFFFFF;
-
-      const int tid = omp_get_thread_num();
-      const int numThreads = omp_get_num_threads();
-
-      // Start and finish index, thread secuential
-      const std::size_t begin = M * tid / numThreads;
-      const std::size_t end = M * (tid + 1) / numThreads;
-
-      {
-        // 2.c.1 Skip start the first group
-        std::size_t skipStart = begin;
-        if (skipStart > 0 &&
-            ((inverseEdge[skipStart] >> 22) & BIT_MASK_22) ==
-                ((inverseEdge[skipStart - 1] >> 22) & BIT_MASK_22)) {
-          const uint64_t a = ((inverseEdge[skipStart] >> 22) & BIT_MASK_22);
-          while (skipStart < end &&
-                 ((inverseEdge[skipStart] >> 22) & BIT_MASK_22) == a)
-            skipStart++;
-        }
-
-        std::size_t it = skipStart;
-        while (it < end) {
-          // 2.c.2. Find group size
-          const uint64_t a = (inverseEdge[it] >> 22) & BIT_MASK_22;
-          std::size_t gEnd = it + 1;
-          while (gEnd < M && ((inverseEdge[gEnd] >> 22) & BIT_MASK_22) == a)
-            gEnd++;
-
-          // 2.c.3 Fill direct edge conexions, remove encoded index and add
-          // light edge counter
-          for (size_t k = it; k < gEnd; k++) {
-            uint32_t index = uint32_t(inverseEdge[k] >> 44);
-            uint32_t b = uint32_t(inverseEdge[k] & 0x3FFFFF);
-            float weight = adj[b].edges[index].weight;
-            assert(adj[a].valence < MAX_VTX_VALENCE &&
-                   "======== Mesh execeds MAX_VTX_VALENCE ========");
-            adj[a].edges[adj[a].valence++] = {.index = b, .weight = weight};
-
-            inverseEdge[k] &= BIT_MASK_44; // First 44 bits
-
-            if (weight < DELTA) {
-              adj[a].numLightEdges++;
-            }
-          }
-
-          // 2.c.4 Insertion sort
-          for (std::size_t k = 1; k < adj[a].valence; k++) {
-            const uint64_t v = adj[a].edges[k].index;
-            std::size_t j = k;
-            while (j > it && adj[a].edges[j - 1].index > v) {
-              adj[a].edges[j].index = adj[a].edges[j - 1].index;
-              j--;
-            }
-            adj[a].edges[j].index = v;
-          }
-
-          it = gEnd;
-        }
-      }
-    }
-
-    /*
-    struct CompareEdgeInQueue {
-      bool operator()(const WEdge &lhs, const WEdge &rhs) const {
-        return lhs.weight > rhs.weight;
-      }
-    };
-
-    std::priority_queue<WEdge, std::vector<WEdge>, CompareEdgeInQueue> queue;
-
-    for (size_t i = 0; i < externalEdges.size(); i++) {
-      unsigned aVtx = externalEdges[i].a;
-      boundDist[aVtx] = 0.0;
-      queue.push({aVtx, 0.0});
-    }
-
-    // Dijkstras
-    while (!queue.empty()) {
-      const WEdge item = queue.top();
-      queue.pop();
-      // cout<<"Pop: "<<item.index<<" "<<item.weight<<endl;
-
-      if (boundDist[item.index] < item.weight)
-        continue;
-
-      uint8_t valence = adj[item.index].valence;
-      for (size_t k = 0; k < valence; k++) {
-        auto &conexion = adj[item.index].edges[k];
-        float newDist = conexion.weight + item.weight;
-        if (boundDist[conexion.index] > newDist) {
-          boundDist[conexion.index] = newDist;
-          queue.push({conexion.index, newDist});
-        }
-      }
-    }
-
-    */
-
-    // Delta stepping
-    struct Request {
-      uint32_t vertex;
-      float weight;
-    };
-    uint smallestBucket = 0;
-    std::vector<uint> smallestBucketT(P, NUM_BUCKETS);
-
-    std::vector<std::vector<std::vector<uint32_t>>> buckets(P);
-    for (auto &bset : buckets) {
-      bset.resize(NUM_BUCKETS);
-      for (auto &b : bset) {
-        b.reserve(BUCKET_SIZE);
-      }
-    }
-
-    std::vector<std::vector<std::vector<Request>>> req(P);
-    for (auto &rSet : req) {
-      rSet.resize(P);
-      for (auto &rVec : rSet) {
-        rVec.reserve(REQUEST_SIZE);
-      }
-    }
-
-    std::vector<uint8_t> R(N, 0);
-
-    // Which tId does a vertex index belong to
-    auto ind = [P, N](uint32_t vIdx) -> uint32_t {
-      return static_cast<uint32_t>((static_cast<uint64_t>(vIdx) * P) / N);
-    };
-
-    // Source initialization
-    for (size_t i = 0; i < externalEdges.size(); ++i) {
-      const uint32_t vtx = externalEdges[i].a;
-      boundDist[vtx] = 0.0f;
-      const uint32_t p = ind(vtx);
-      buckets[p][0].push_back(vtx);
-    }
-
-    // Delta-stepping
-#pragma omp parallel num_threads(P)                                            \
-    shared(adj, boundDist, buckets, req, R, smallestBucket, smallestBucketT)
-    {
-      const int tid = omp_get_thread_num();
-      const int numThreads = omp_get_num_threads();
-
-      auto relaxRequests = [&]() {
-        for (int t = 0; t < static_cast<int>(P); t++) {
-          auto &rvec = req[tid][t];
-          for (auto &r : rvec) {
-            if (r.vertex >= N)
-              continue;
-            if (boundDist[r.vertex] <= r.weight)
-              continue; // no better
-            boundDist[r.vertex] = r.weight;
-            int nb = r.weight / DELTA;
-            if (nb >= NUM_BUCKETS)
-              nb = NUM_BUCKETS - 1;
-            buckets[tid][nb].push_back(r.vertex);
-          }
-          rvec.clear();
-        }
-      };
-
-      auto findRequests = [&]() {
-        auto &vec = buckets[tid][smallestBucket];
-        for (auto vtx : vec) {
-          const float w = boundDist[vtx];
-          int bId = w / DELTA;
-          if (bId >= NUM_BUCKETS)
-            bId = NUM_BUCKETS - 1;
-          if (bId != smallestBucket)
-            continue; // stale request
-
-          auto &a = adj[vtx];
-          R[vtx] = 1;
-          for (int i = 0; i < a.numLightEdges; ++i) {
-            auto &c = a.edges[i];
-            int tDst = ind(c.index);
-            req[tDst][tid].push_back({c.index, w + c.weight});
-          }
-        }
-        vec.clear();
-      };
-
-      auto findRequestsinR = [&]() {
-        const uint64_t start = ((tid)*N + P - 1) / P;
-        const uint64_t end = ((tid + 1) * N + P - 1) / P;
-        for (uint64_t ridx = start; ridx < end; ridx++) {
-          if (ridx >= N)
-            break;
-          if (R[ridx] == 0)
-            continue; // Not visited
-          const uint32_t vtx = static_cast<uint32_t>(ridx);
-          const float vtxW = boundDist[vtx];
-          auto &a = adj[vtx];
-          for (int i = static_cast<int>(a.numLightEdges);
-               i < static_cast<int>(a.valence); ++i) {
-            auto &c = a.edges[i];
-            const uint32_t tDst = ind(c.index);
-            req[tDst][tid].push_back(Request{c.index, vtxW + c.weight});
-          }
-        }
-      };
-
-      while (true) {
-        // Get local min bucket
-        smallestBucketT[tid] = NUM_BUCKETS;
-        for (uint b = 0; b < NUM_BUCKETS; ++b) {
-          if (!buckets[tid][b].empty()) {
-            smallestBucketT[tid] = b;
-            break; // el PRIMERO no vacío, no el último
-          }
-        }
-
-#pragma omp barrier
-
-#pragma omp single
-        {
-          // Get global min bucket
-          smallestBucket = NUM_BUCKETS;
-          for (int t = 0; t < numThreads; ++t) {
-            if (smallestBucketT[t] < smallestBucket)
-              smallestBucket = smallestBucketT[t];
-          }
-          // Empty R
-          std::fill(R.begin(), R.end(), 0);
-        }
-#pragma omp barrier
-
-        // If list is done exit
-        if (smallestBucket == NUM_BUCKETS)
-          break;
-
-        // Delta stepping main logic
-        {
-          auto &localB = buckets[tid][smallestBucket];
-          if (!localB.empty()) {
-            findRequests();
-            localB.clear();
-          }
-        }
-#pragma omp barrier
-
-        relaxRequests();
-#pragma omp barrier
-
-        findRequestsinR();
-#pragma omp barrier
-
-        relaxRequests();
-#pragma omp barrier
-      }
-    }
-
-    // Get max distance and deepest vertex
+    // -----------------------------------------------------------------------
     float maxDist = findMax(deepestVertex, boundDist);
+    TP t6 = now();
+
+    // -----------------------------------------------------------------------
+    const double t_init = us(t0, t1);
+    const double t_adj = us(t1, t2);
+    const double t_copyIn = us(t2, t3);
+    const double t_sssp = us(t3, t4);
+    const double t_copyOut = us(t4, t5);
+    const double t_max = us(t5, t6);
+    const double t_total =
+        t_init + t_adj + t_copyIn + t_sssp + t_copyOut + t_max;
+
+    auto pct = [t_total](double v) { return 100.0 * v / t_total; };
+
+    std::cout << "\n=== Profiling meshBoundary ===\n";
+    std::cout << "  N vertex         : " << N << "\n";
+    std::cout << "  threads          : " << omp_get_max_threads() << "\n";
+    std::cout << "  ------------------------------------------------\n";
+    std::cout << "  init dist        : " << t_init << " us  (" << pct(t_init)
+              << " %)\n";
+    std::cout << "  getAdjMatrix     : " << t_adj << " us  (" << pct(t_adj)
+              << " %)\n";
+    std::cout << "  copy to atomic   : " << t_copyIn << " us  ("
+              << pct(t_copyIn) << " %)\n";
+    std::cout << "  delta-stepping   : " << t_sssp << " us  (" << pct(t_sssp)
+              << " %)\n";
+    std::cout << "  copy from atomic : " << t_copyOut << " us  ("
+              << pct(t_copyOut) << " %)\n";
+    std::cout << "  findMax          : " << t_max << " us  (" << pct(t_max)
+              << " %)\n";
+    std::cout << "  ------------------------------------------------\n";
+    std::cout << "  TOTAL            : " << t_total << " us\n";
+    std::cout << std::flush;
 
     if (maxDist == INFINITY) {
       cout << "meshBoundary IMPOSIBLE: No frontier found, fatal error" << endl;
