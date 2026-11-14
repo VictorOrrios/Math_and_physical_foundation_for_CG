@@ -142,38 +142,43 @@ int main(int argc, char *argv[]) {
       maxEdgeLen = max({maxEdgeLen, lenAB, lenAC, lenBC});
       averageEdgeLen += lenAB + lenAC + lenBC;
 
-      const double area = mesh.triangleArea(tri);
-      const double shapeF = mesh.triangleShapeFactor(tri);
-      triShapesFactors[i] = shapeF;
+      // Area calc
+      const double crossMag = AB.cross(AC).module();
+      const double area = 0.5 * crossMag;
 
       minArea = min(minArea, area);
       maxArea = max(maxArea, area);
       totalArea += area;
 
+      // Shape factor calc
+      const double minL = min({lenAB, lenAC, lenBC});
+      const double abc = lenAB * lenAC * lenBC;
+      const double radius = abc / (2.0 * crossMag);
+      const double shapeF =
+          (radius == 0.0) ? 0.0 : minL / (radius * std::sqrt(3.0));
+
       minShapeFactor = min(minShapeFactor, shapeF);
       maxShapeFactor = max(maxShapeFactor, shapeF);
       averageShapeFactor += shapeF;
+      triShapesFactors[i] = shapeF;
 
       double Aarea, Barea, Carea;
       if (Adot < 0.0 || Bdot < 0.0 || Cdot < 0.0) {
-        // Obtuse triangle
         const double triAreax2 = area * 2.0;
         const double triAreax4 = triAreax2 * 2.0;
-        // Has to be times 2 and times 4 to cancel the later division by 8
         Aarea = Adot > 0.0 ? triAreax2 : triAreax4;
         Barea = Bdot > 0.0 ? triAreax2 : triAreax4;
         Carea = Cdot > 0.0 ? triAreax2 : triAreax4;
       } else {
-          // Acute triangle
         const double a = lenBC;
         const double b = lenAC;
         const double c = lenAB;
-        const double Across = AB.cross(AC).module();
+        const double Across = crossMag; // Reuse
         const double Bcross = AB.cross(BC).module();
         const double Ccross = AC.cross(BC).module();
-        const double Aterm = a * a * (Adot / Across); // |BC|²cot(Â)
-        const double Bterm = b * b * (Bdot / Bcross); // |AC|²cot(B)
-        const double Cterm = c * c * (Cdot / Ccross); // |AB|²cot(Ĉ)
+        const double Aterm = a * a * (Adot / Across);
+        const double Bterm = b * b * (Bdot / Bcross);
+        const double Cterm = c * c * (Cdot / Ccross);
         Aarea = Bterm + Cterm;
         Barea = Aterm + Cterm;
         Carea = Aterm + Bterm;
