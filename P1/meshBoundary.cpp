@@ -49,13 +49,11 @@ using namespace std::chrono;
 constexpr float DELTA = 0.3f;
 constexpr uint MAX_VTX_VALENCE = 20;
 
-struct WeightedEdge {
-  uint32_t index;
-  float weight;
-};
-struct VertexAdj {
-  uint8_t valence = 0;
-  std::array<WeightedEdge, MAX_VTX_VALENCE> edges;
+// Compressed Sparse Row format for adjacency matrix
+struct CSRMatrix {
+  std::vector<uint32_t> offset;
+  std::vector<uint32_t> dst;
+  std::vector<float> weight;
 };
 
 // Mesh with the most vertex is Venus3000 with 1.5M vertex
@@ -271,142 +269,72 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
   }
 }
 
-std::vector<VertexAdj> getAdjMatrix(SimpleMesh &mesh,
-                                    std::vector<SimpleEdge> &internalEdges) {
-
+CSRMatrix getAdjMatrix(SimpleMesh &mesh,
+                       std::vector<SimpleEdge> &internalEdges) {
   const unsigned N = mesh.numVertex();
-  const unsigned M = internalEdges.size();
 
-  std::vector<VertexAdj> adj(N);
+  CSRMatrix adj;
+  adj.offset.assign(N + 1, 0);
 
-  // 1. Compute edge weights
-  std::vector<float> weight(M);
+  // Count valence
+  for (const auto &e : internalEdges) {
+    adj.offset[e.a + 1]++;
+    adj.offset[e.b + 1]++;
+  }
+
+  // Acumm offsets
+  for (unsigned v = 1; v <= N; ++v)
+    adj.offset[v] += adj.offset[v - 1];
+
+  const std::size_t E = adj.offset[N]; // = 2*internalEdges.size()
+  adj.dst.resize(E);
+  adj.weight.resize(E);
+
+  // Shared atomic copy
+  std::vector<std::atomic<uint32_t>> cursor(N + 1);
 #pragma omp parallel for schedule(static)
-  for (size_t i = 0; i < M; i++) {
-    weight[i] = mesh.distance(internalEdges[i].a, internalEdges[i].b);
-  }
+  for (unsigned v = 0; v <= N; ++v)
+    cursor[v].store(adj.offset[v], std::memory_order_relaxed);
 
-  // 2. Build adjacency matrix
+  // Fill matrix
+#pragma omp parallel for schedule(static)
+  for (std::size_t i = 0; i < internalEdges.size(); ++i) {
+    const auto &e = internalEdges[i];
+    const float w = mesh.distance(e.a, e.b);
 
-  std::vector<uint64_t> inverseEdge(M);
+    uint32_t pos = cursor[e.a].fetch_add(1, std::memory_order_relaxed);
+    adj.dst[pos] = e.b;
+    adj.weight[pos] = w;
 
-  // 2.a. First pass: Direct fill wirh internal edges
-#pragma omp parallel shared(internalEdges, adj)
-  {
-    const int tid = omp_get_thread_num();
-    const int numThreads = omp_get_num_threads();
-
-    // Start and finish index, thread secuential
-    const std::size_t begin = M * tid / numThreads;
-    const std::size_t end = M * (tid + 1) / numThreads;
-
-    {
-      // 2.a.1 Skip start the first group
-      std::size_t skipStart = begin;
-      if (skipStart > 0 &&
-          internalEdges[skipStart].a == internalEdges[skipStart - 1].a) {
-        const uint64_t a = internalEdges[skipStart].a;
-        while (skipStart < end && internalEdges[skipStart].a == a)
-          skipStart++;
-      }
-
-      std::size_t it = skipStart;
-      while (it < end) {
-        // 2.a.2. Find group size
-        const uint64_t a = internalEdges[it].a;
-        std::size_t gEnd = it + 1;
-        while (gEnd < M && internalEdges[gEnd].a == a)
-          gEnd++;
-
-        // 2.a.3 Fill direct edge conexxions
-        for (size_t k = it; k < gEnd; ++k) {
-          unsigned b = internalEdges[k].b;
-          // Update weight
-          assert(adj[a].valence < MAX_VTX_VALENCE &&
-                 "======== Mesh execeds MAX_VTX_VALENCE ========");
-          adj[a].edges[adj[a].valence] = {.index = uint32_t(b),
-                                          .weight = weight[k]};
-          // Cretae 64bit inverse edge with adj index encoding
-          inverseEdge[k] = edge64bitWIdxEncoding(adj[a].valence, b, a);
-          // Update valence on both vertex
-          adj[a].valence++;
-        }
-
-        it = gEnd;
-      }
-    }
-  }
-
-  // 2.b. Radix sort the inverse edges
-  parallelRadixSort11bit(inverseEdge, 22, 2);
-
-// 2.c. Second pass: Indirect fill with inverse internal edges
-#pragma omp parallel shared(inverseEdge, adj)
-  {
-    constexpr uint64_t BIT_MASK_22 = 0x3FFFFF;
-
-    const int tid = omp_get_thread_num();
-    const int numThreads = omp_get_num_threads();
-
-    // Start and finish index, thread secuential
-    const std::size_t begin = M * tid / numThreads;
-    const std::size_t end = M * (tid + 1) / numThreads;
-
-    {
-      // 2.c.1 Skip start the first group
-      std::size_t skipStart = begin;
-      if (skipStart > 0 &&
-          ((inverseEdge[skipStart] >> 22) & BIT_MASK_22) ==
-              ((inverseEdge[skipStart - 1] >> 22) & BIT_MASK_22)) {
-        const uint64_t a = ((inverseEdge[skipStart] >> 22) & BIT_MASK_22);
-        while (skipStart < end &&
-               ((inverseEdge[skipStart] >> 22) & BIT_MASK_22) == a)
-          skipStart++;
-      }
-
-      std::size_t it = skipStart;
-      while (it < end) {
-        // 2.c.2. Find group size
-        const uint64_t a = (inverseEdge[it] >> 22) & BIT_MASK_22;
-        std::size_t gEnd = it + 1;
-        while (gEnd < M && ((inverseEdge[gEnd] >> 22) & BIT_MASK_22) == a)
-          gEnd++;
-
-        // 2.c.3 Fill direct edge conexions, remove encoded index and add
-        // light edge counter
-        for (size_t k = it; k < gEnd; k++) {
-          uint32_t index = uint32_t(inverseEdge[k] >> 44);
-          uint32_t b = uint32_t(inverseEdge[k] & 0x3FFFFF);
-          float weight = adj[b].edges[index].weight;
-          assert(adj[a].valence < MAX_VTX_VALENCE &&
-                 "======== Mesh execeds MAX_VTX_VALENCE ========");
-          adj[a].edges[adj[a].valence++] = {.index = b, .weight = weight};
-        }
-
-        it = gEnd;
-      }
-    }
+    pos = cursor[e.b].fetch_add(1, std::memory_order_relaxed);
+    adj.dst[pos] = e.a;
+    adj.weight[pos] = w;
   }
 
   return adj;
 }
 
 // Compare and exchange macro
-inline bool cas(std::atomic<float> &x, float old_val, float new_val) {
-  return x.compare_exchange_strong(old_val, new_val);
+inline bool cas(double &x, double old_val, double new_val) {
+  // CAS intrinsic with necesary uint64_t casts
+  uint64_t old_bits, new_bits;
+  std::memcpy(&old_bits, &old_val, sizeof(double));
+  std::memcpy(&new_bits, &new_val, sizeof(double));
+  return __atomic_compare_exchange_n(reinterpret_cast<uint64_t *>(&x),
+                                     &old_bits, new_bits, false,
+                                     __ATOMIC_RELAXED, __ATOMIC_RELAXED);
 }
 
-// Adapted from sbeamer/gapbs/sssp.c
-inline void RelaxEdges(const std::vector<VertexAdj> &adj, uint32_t u,
-                       std::vector<std::atomic<float>> &dist,
+// Adapted from https://github.com/sbeamer/gapbs/blob/master/src/sssp.cc
+inline void RelaxEdges(const CSRMatrix &adj, uint32_t u,
+                       std::vector<double> &dist,
                        std::vector<std::vector<uint32_t>> &local_bins) {
-  const auto &a = adj[u];
   const float dist_u = dist[u];
-  for (int i = 0; i < a.valence; ++i) {
-    const auto &c = a.edges[i];
-    const uint32_t v = c.index;
+  for (uint32_t i = adj.offset[u]; i < adj.offset[u + 1]; i++) {
+    const uint32_t v = adj.dst[i];
+    const float w = adj.weight[i];
     float old_dist = dist[v];
-    float new_dist = dist_u + c.weight;
+    float new_dist = dist_u + w;
     while (new_dist < old_dist) {
       if (cas(dist[v], old_dist, new_dist)) {
         size_t dest_bin = static_cast<size_t>(new_dist / DELTA);
@@ -420,21 +348,15 @@ inline void RelaxEdges(const std::vector<VertexAdj> &adj, uint32_t u,
   }
 }
 
-// Adapted from sbeamer/gapbs/sssp.c
-void delta_stepping_mssp(const std::vector<VertexAdj> &adj,
+// Adapted from https://github.com/sbeamer/gapbs/blob/master/src/sssp.cc
+void delta_stepping_mssp(const CSRMatrix &adj,
                          const std::vector<SimpleEdge> &externalEdges,
-                         unsigned N,
-                         std::vector<std::atomic<float>> &boundDist) {
+                         unsigned N, std::vector<double> &boundDist) {
   const size_t kMaxBin = std::numeric_limits<size_t>::max() / 2;
   const size_t kBinSizeThreshold = 1000; // Gapbs default value
 
   // 1. Get total mesh valence for maximum frontier size
-  // Uses reduction(+ : E) to avoid race
-  size_t tot_val = 0;
-#pragma omp parallel for schedule(static) reduction(+ : tot_val)
-  for (std::size_t i = 0; i < adj.size(); ++i)
-    tot_val += static_cast<size_t>(adj[i].valence);
-
+  size_t tot_val = adj.offset.back();
   std::vector<uint32_t> frontier(tot_val, 0);
 
   // 2. Multisource initialization
@@ -721,39 +643,23 @@ int main(int argc, char *argv[]) {
     TP t1 = now();
 
     // -----------------------------------------------------------------------
-    std::vector<VertexAdj> adj = getAdjMatrix(mesh, internalEdges);
+    CSRMatrix adj = getAdjMatrix(mesh, internalEdges);
     TP t2 = now();
 
     // -----------------------------------------------------------------------
-    std::vector<std::atomic<float>> atomicBoundDist(boundDist.size());
-#pragma omp parallel for schedule(static)
-    for (std::size_t i = 0; i < boundDist.size(); ++i)
-      atomicBoundDist[i].store(boundDist[i], std::memory_order_relaxed);
+    delta_stepping_mssp(adj, externalEdges, N, boundDist);
     TP t3 = now();
 
     // -----------------------------------------------------------------------
-    delta_stepping_mssp(adj, externalEdges, N, atomicBoundDist);
-    TP t4 = now();
-
-// -----------------------------------------------------------------------
-#pragma omp parallel for schedule(static)
-    for (std::size_t i = 0; i < boundDist.size(); ++i)
-      boundDist[i] = atomicBoundDist[i].load(std::memory_order_relaxed);
-    TP t5 = now();
-
-    // -----------------------------------------------------------------------
     float maxDist = findMax(deepestVertex, boundDist);
-    TP t6 = now();
+    TP t4 = now();
 
     // -----------------------------------------------------------------------
     const double t_init = us(t0, t1);
     const double t_adj = us(t1, t2);
-    const double t_copyIn = us(t2, t3);
-    const double t_sssp = us(t3, t4);
-    const double t_copyOut = us(t4, t5);
-    const double t_max = us(t5, t6);
-    const double t_total =
-        t_init + t_adj + t_copyIn + t_sssp + t_copyOut + t_max;
+    const double t_sssp = us(t2, t3);
+    const double t_max = us(t3, t4);
+    const double t_total = t_init + t_adj + t_sssp + t_max;
 
     auto pct = [t_total](double v) { return 100.0 * v / t_total; };
 
@@ -765,12 +671,8 @@ int main(int argc, char *argv[]) {
               << " %)\n";
     std::cout << "  getAdjMatrix     : " << t_adj << " us  (" << pct(t_adj)
               << " %)\n";
-    std::cout << "  copy to atomic   : " << t_copyIn << " us  ("
-              << pct(t_copyIn) << " %)\n";
     std::cout << "  delta-stepping   : " << t_sssp << " us  (" << pct(t_sssp)
               << " %)\n";
-    std::cout << "  copy from atomic : " << t_copyOut << " us  ("
-              << pct(t_copyOut) << " %)\n";
     std::cout << "  findMax          : " << t_max << " us  (" << pct(t_max)
               << " %)\n";
     std::cout << "  ------------------------------------------------\n";
