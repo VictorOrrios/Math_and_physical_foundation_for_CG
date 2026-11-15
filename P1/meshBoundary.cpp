@@ -62,10 +62,6 @@ inline uint64_t edge64bit(uint32_t a, uint32_t b) {
   return a < b ? (uint64_t(a) << 22) | b : (uint64_t(b) << 22) | a;
 }
 
-inline uint64_t edge64bitWIdxEncoding(uint32_t idx, uint32_t a, uint32_t b) {
-  return ((uint64_t(idx) << 44)) | (uint64_t(a) << 22) | b;
-}
-
 inline SimpleEdge bitToEdge(uint64_t bits) {
   bits &= 0x7FFFFFFFFFFFULL; // Clean unique edge bit flag
   return SimpleEdge(bits >> 22, bits & 0x3FFFFF);

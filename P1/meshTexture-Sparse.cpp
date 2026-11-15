@@ -48,6 +48,219 @@ using Eigen::SparseMatrix;
 #include "Eigen/SparseCholesky"
 #include "Eigen/SparseLU"
 
+#include <algorithm>
+#include <atomic>
+#include <omp.h>
+
+// Mesh with the most vertex is Venus3000 with 1.5M vertex
+// 22 bits to store an index => 44 bits per edge => 11bit radix sort is optimal
+inline uint64_t edge64bit(uint32_t a, uint32_t b) {
+  return a < b ? (uint64_t(a) << 22) | b : (uint64_t(b) << 22) | a;
+}
+
+inline SimpleEdge bitToEdge(uint64_t bits) {
+  bits &= 0x7FFFFFFFFFFFULL; // Clean unique edge bit flag
+  return SimpleEdge(bits >> 22, bits & 0x3FFFFF);
+}
+
+inline void parallelRadixSort11bit(std::vector<uint64_t> &data, int startBit,
+                                   int numPasses) {
+  constexpr int RADIX_BITS = 11;
+  constexpr int RADIX = 1 << RADIX_BITS; // 2048
+  constexpr int RADIX_MASK = RADIX - 1;
+
+  const std::size_t n = data.size();
+  if (n == 0 || numPasses <= 0)
+    return;
+
+  const int maxThreads = omp_get_max_threads();
+
+  // Scratch buffer. We use a stable MSD radix sort implementation
+  std::vector<uint64_t> buffer(n);
+  // Frecuency histogram
+  std::vector<std::array<uint32_t, RADIX>> hist(maxThreads);
+  // Pass copy global offsets
+  std::vector<std::array<uint32_t, RADIX>> offsets(maxThreads);
+
+#pragma omp parallel shared(hist, offsets)
+  {
+    const int tid = omp_get_thread_num();
+    const int numThreads = omp_get_num_threads();
+
+    const std::size_t begin = n * tid / numThreads;
+    const std::size_t end = n * (tid + 1) / numThreads;
+
+    // Ping pong buffer flag
+    bool isPassEven = true;
+
+    for (int pass = 0; pass < numPasses; ++pass) {
+      uint64_t *src = isPassEven ? data.data() : buffer.data();
+      uint64_t *dst = isPassEven ? buffer.data() : data.data();
+      const int shift = startBit + pass * RADIX_BITS;
+
+      // (a) Frecuency counting
+      auto &localHist = hist[tid];
+      localHist.fill(0);
+      for (std::size_t i = begin; i < end; ++i)
+        localHist[(src[i] >> shift) & RADIX_MASK]++;
+
+      // (b) Compute offsets (exclusive scan)
+#pragma omp barrier
+#pragma omp single
+      {
+        std::size_t bucketBase = 0;
+        for (int bucket = 0; bucket < RADIX; ++bucket) {
+          std::size_t pos = bucketBase;
+          for (int t = 0; t < numThreads; ++t) {
+            offsets[t][bucket] = pos;
+            pos += hist[t][bucket];
+          }
+          bucketBase = pos;
+        }
+      } // Implicit barrier
+
+      // (c) Stable scatter
+      auto next = offsets[tid];
+      for (std::size_t i = begin; i < end; ++i)
+        dst[next[(src[i] >> shift) & RADIX_MASK]++] = src[i];
+
+      // Flip ping pong
+      isPassEven = !isPassEven;
+#pragma omp barrier
+    }
+
+    // Just in case num of passes is odd
+    if (!isPassEven) {
+      for (std::size_t i = begin; i < end; ++i)
+        data[i] = buffer[i];
+    }
+  }
+}
+
+void sortAndClassifyEdges(std::vector<uint64_t> &edges,
+                          std::vector<SimpleEdge> &externalEdges,
+                          std::vector<SimpleEdge> &internalEdges) {
+  const std::size_t n = edges.size();
+
+  // 1. Radix sort by bits 22 to 43 (lower index in an edge)
+  parallelRadixSort11bit(edges, 22, 2);
+
+  // Unique edge bit flag
+  // Used instead of bool/bit vector for less memory and better cache
+  constexpr uint64_t UNIQUE_EDGE_BIT_MASK = 0x8000000000000000ULL;
+
+  const int maxThreads = omp_get_max_threads();
+
+  // Count to resize output vectors. [0] = internal [1] = external
+  std::vector<std::array<uint32_t, 2>> intExtCounts(maxThreads, {0, 0});
+
+#pragma omp parallel shared(externalEdges, internalEdges, intExtCounts)
+  {
+    const int tid = omp_get_thread_num();
+    const int numThreads = omp_get_num_threads();
+
+    const std::size_t begin = n * tid / numThreads;
+    const std::size_t end = n * (tid + 1) / numThreads;
+
+    // 2. Skip first group in thread block range
+    std::size_t skipStart = begin;
+    if (skipStart > 0 &&
+        (edges[skipStart] >> 22) == (edges[skipStart - 1] >> 22)) {
+      const uint64_t a = edges[skipStart] >> 22;
+      while (skipStart < end && (edges[skipStart] >> 22) == a)
+        skipStart++;
+    }
+
+    // 3. Sort + Mark + Count. One pass
+    {
+      std::size_t it = skipStart;
+      uint32_t localExt = 0;
+
+      while (it < end) {
+        // 3.a. Get edge group range
+        const uint64_t a = edges[it] >> 22;
+        std::size_t gEnd = it + 1;
+        while (gEnd < n && (edges[gEnd] >> 22) == a)
+          gEnd++;
+
+        // 3.b. Insertion sort the lower 22 bit
+        // Adapted from https://en.wikipedia.org/wiki/Insertion_sort pseudocode
+        // Note: Since the higher 22 bit are already sorted direct comparison
+        // w/o bitwise AND is optimal
+        for (std::size_t k = it + 1; k < gEnd; k++) {
+          const uint64_t v = edges[k];
+          std::size_t j = k;
+          while (j > it && edges[j - 1] > v) {
+            edges[j] = edges[j - 1];
+            j--;
+          }
+          edges[j] = v;
+        }
+
+        // 3.c. Mark unique edges with bit flag and count the number of edges
+        // marked
+        std::size_t p = it;
+        while (p < gEnd) {
+          if (p + 1 < gEnd && edges[p] == edges[p + 1]) {
+            p += 2;
+          } else {
+            edges[p] |= UNIQUE_EDGE_BIT_MASK;
+            localExt++;
+            p++;
+          }
+        }
+
+        it = gEnd;
+      }
+
+      // Record counts, compute internal count using total visited - external
+      // marked
+      intExtCounts[tid][0] = (it - skipStart - localExt) / 2;
+      intExtCounts[tid][1] = localExt;
+    }
+
+    // 4. Compute output vector sizes and acummulate thread write offsets
+#pragma omp barrier
+#pragma omp single
+    {
+      std::size_t internalAcumm = 0;
+      std::size_t externalAcumm = 0;
+      // Acummulate and write
+      for (int i = 0; i < numThreads; i++) {
+        const auto auxInt = intExtCounts[i][0];
+        const auto auxExt = intExtCounts[i][1];
+
+        intExtCounts[i][0] = internalAcumm;
+        intExtCounts[i][1] = externalAcumm;
+        internalAcumm += auxInt;
+        externalAcumm += auxExt;
+      }
+      internalEdges.clear();
+      externalEdges.clear();
+      internalEdges.resize(internalAcumm);
+      externalEdges.resize(externalAcumm);
+    } // Implicit omp barrier given by omp single
+
+    // 5. Fill output vectors using write offsets
+    {
+      std::size_t it = skipStart;
+      uint32_t extOff = intExtCounts[tid][1];
+      uint32_t intOff = intExtCounts[tid][0];
+
+      // Use bit flag to now next edge to visit
+      while (it < end) {
+        if (edges[it] & UNIQUE_EDGE_BIT_MASK) {
+          externalEdges[extOff++] = bitToEdge(edges[it]);
+          it++;
+        } else {
+          internalEdges[intOff++] = bitToEdge(edges[it]);
+          it += 2;
+        }
+      }
+    }
+  }
+}
+
 /// Write an Eigen Matrix to a matlab file
 void exportDenseToMatlab(const Eigen::MatrixXd &m, const std::string &filename,
                          const std::string matrixName = "A") {
@@ -108,55 +321,35 @@ void exportSparseToMatlab(const Eigen::SparseMatrix<double> &m,
 void updateEdgeLists(const SimpleMesh &mesh,
                      std::vector<SimpleEdge> &externalEdges,
                      std::vector<SimpleEdge> &internalEdges) {
-  // TODO 2.1: Copy the your body of the updateEdgeLists() method from
-  // meshBoundary.cpp
-  //   Hash function for an edge. Only works with edges contaning vertices in
-  //   [0,mesh.numvertex())
-  struct SimpleEdgeHash {
-    std::size_t numVertex;
-    std::size_t operator()(const SimpleEdge &e) const {
-      return min(e.a, e.b) + max(e.a, e.b) * numVertex;
-    }
-  };
-
-  struct SimpleEdgeEqual {
-    bool operator()(const SimpleEdge &lhs, const SimpleEdge &rhs) const {
-      return (lhs.a == rhs.a && lhs.b == rhs.b) ||
-             (lhs.a == rhs.b && lhs.b == rhs.a);
-    }
-  };
-
-  std::unordered_set<SimpleEdge, SimpleEdgeHash, SimpleEdgeEqual> externalSet(
-      0, SimpleEdgeHash{mesh.numVertex()}),
-      internalSet(0, SimpleEdgeHash{mesh.numVertex()});
-
-  for (auto &tri : mesh.triangles) {
-    for (auto &edge : tri.edges()) {
-      auto internalIt = internalSet.find(edge);
-      if (internalIt != internalSet.end()) {
-        throw("TODO 2.1 IMPOSIBLE: Input mesh is not a manifold");
-      }
-
-      auto externalIt = externalSet.find(edge);
-      if (externalIt != externalSet.end()) {
-        externalSet.erase(externalIt);
-        internalSet.insert(internalIt, edge);
-      } else {
-        externalSet.insert(externalIt, edge);
-      }
-    }
-  }
-
   externalEdges.clear();
   internalEdges.clear();
-  externalEdges.reserve(externalSet.size());
-  internalEdges.reserve(internalSet.size());
 
+  // TODO 2.1: Implement the body of the updateEdgeLists() method
+  const std::size_t maxEdgeOccurrences = 3 * mesh.triangles.size();
+
+  // Get all edges
+  std::vector<uint64_t> edges(maxEdgeOccurrences);
+#pragma omp parallel for schedule(static)
+  for (std::size_t i = 0; i < mesh.triangles.size(); ++i) {
+    const auto &tri = mesh.triangles[i];
+
+    const std::size_t j = 3 * i;
+
+    edges[j] = edge64bit(tri.a, tri.b);
+    edges[j + 1] = edge64bit(tri.b, tri.c);
+    edges[j + 2] = edge64bit(tri.c, tri.a);
+  }
+
+  // Radix sort
+  sortAndClassifyEdges(edges, externalEdges, internalEdges);
+
+  // Find the smallest vertex on the boundary.
   vec3 minPos(INFINITY, INFINITY, INFINITY);
-  unsigned minVertex = -1;
+  unsigned minVertex = static_cast<unsigned>(-1);
 
   auto updateMin = [&](unsigned v) {
-    vec3 pos = mesh.coordinates[v];
+    const vec3 &pos = mesh.coordinates[v];
+
     if ((pos.X < minPos.X) || (pos.X == minPos.X && pos.Y < minPos.Y) ||
         (pos.X == minPos.X && pos.Y == minPos.Y && pos.Z < minPos.Z)) {
       minPos = pos;
@@ -164,39 +357,60 @@ void updateEdgeLists(const SimpleMesh &mesh,
     }
   };
 
-  // Untangle the external edges
-  std::unordered_map<unsigned, unsigned> edgeMap(externalSet.size());
-  for (auto &exEdge : externalSet) {
-    if (edgeMap.count(exEdge.a)) {
-      edgeMap[exEdge.b] = exEdge.a;
-      updateMin(exEdge.b);
-    } else {
-      edgeMap[exEdge.a] = exEdge.b;
-      updateMin(exEdge.a);
-    }
+  auto eraseOne = [](std::vector<unsigned> &vec, unsigned value) {
+    auto it = std::find(vec.begin(), vec.end(), value);
+    if (it != vec.end())
+      vec.erase(it);
+  };
+
+  // Build the boundary edge map.
+  std::unordered_map<unsigned, std::vector<unsigned>> edgeMap(
+      externalEdges.size());
+
+  for (const auto &exEdge : externalEdges) {
+    edgeMap[exEdge.a].push_back(exEdge.b);
+    edgeMap[exEdge.b].push_back(exEdge.a);
+    updateMin(exEdge.a);
+    updateMin(exEdge.b);
   }
 
+  // Order external edges into boundary loops.
   unsigned currVertex = minVertex;
-  for (size_t i = 0; i < externalSet.size(); i++) {
-    if (!edgeMap.count(currVertex)) {
-      // New loop => Find new staring point
-      minPos.set(INFINITY, INFINITY, INFINITY);
-      minVertex = -1;
-      for (auto &it : edgeMap)
-        updateMin(it.first);
+  for (std::size_t i = 0; i < externalEdges.size(); i++) {
+    auto itCur = edgeMap.find(currVertex);
+
+    if (itCur == edgeMap.end() || itCur->second.empty()) {
+      // New loop, find new minimum
+      minPos = vec3(INFINITY, INFINITY, INFINITY);
+
+      bool found = false;
+      for (const auto &entry : edgeMap) {
+        if (!entry.second.empty()) {
+          updateMin(entry.first);
+          found = true;
+        }
+      }
+      if (!found)
+        break; // Just in case
+
       currVertex = minVertex;
+      itCur = edgeMap.find(currVertex);
     }
 
-    unsigned nextVertex = edgeMap.at(currVertex);
-    externalEdges.push_back(SimpleEdge(currVertex, nextVertex));
-    edgeMap.erase(currVertex);
-    currVertex = nextVertex;
+    // Get next vertex.
+    unsigned next = itCur->second.back();
+    itCur->second.pop_back();
+
+    // Remove the reverse edge from next.
+    auto itNext = edgeMap.find(next);
+    if (itNext != edgeMap.end())
+      eraseOne(itNext->second, currVertex);
+
+    // Save current edge
+    externalEdges[i] = SimpleEdge(currVertex, next);
+    currVertex = next;
   }
-
-  for (auto &edge : internalSet)
-    internalEdges.push_back(edge);
   // END TODO 2.1
-
 } // void updateEdgeLists()
 
 int main(int argc, char *argv[]) {
@@ -296,70 +510,98 @@ int main(int argc, char *argv[]) {
     //       \/         .
     //
 
-    std::vector<bool> isBoundary(numVertex, false);
+    auto t0 = high_resolution_clock::now();
+
+
+    std::vector<char> isBoundary(numVertex, 0);
     for (const auto &edge : externalEdges) {
-      isBoundary[edge.a] = true;
-      isBoundary[edge.b] = true;
+      isBoundary[edge.a] = 1;
+      isBoundary[edge.b] = 1;
     }
 
-    std::vector<Eigen::Triplet<double>> triplets;
-    triplets.reserve(mesh.triangles.size() * 6);
+    const std::size_t numTri = mesh.triangles.size();
+    const int nThreads = omp_get_max_threads();
+
+    std::vector<std::vector<Eigen::Triplet<double>>> localTriplets(nThreads);
+    std::vector<std::vector<double>> localSumRow(
+        nThreads, std::vector<double>(numVertex, 0.0));
+
+    for (int t = 0; t < nThreads; ++t)
+      localTriplets[t].reserve((numTri / nThreads + 1) * 6);
+
+    #pragma omp parallel
+    {
+      const int tId = omp_get_thread_num();
+      auto &myTriplets = localTriplets[tId];
+      auto &mySumRow = localSumRow[tId];
+
+      #pragma omp for schedule(static)
+      for (std::size_t i = 0; i < numTri; ++i) {
+        const auto &tri = mesh.triangles[i];
+
+        const vec3 &A = mesh.coordinates[tri.a];
+        const vec3 &B = mesh.coordinates[tri.b];
+        const vec3 &C = mesh.coordinates[tri.c];
+
+        const vec3 AB = A - B;
+        const vec3 AC = A - C;
+        const vec3 BC = B - C;
+
+        const double Adot = AB.dot(AC);
+        const double Bdot = (-AB).dot(BC);
+        const double Cdot = (-AC).dot(-BC);
+
+        const double crossMag = AB.cross(AC).module();
+        const double Acot = Adot / crossMag;
+        const double Bcot = Bdot / crossMag;
+        const double Ccot = Cdot / crossMag;
+
+        auto addTriplets = [&](unsigned a, unsigned b, double cot) {
+          mySumRow[a] += cot;
+          mySumRow[b] += cot;
+          if (!isBoundary[a]) myTriplets.emplace_back(a, b, cot);
+          if (!isBoundary[b]) myTriplets.emplace_back(b, a, cot);
+        };
+        addTriplets(tri.a, tri.b, Ccot);
+        addTriplets(tri.a, tri.c, Bcot);
+        addTriplets(tri.b, tri.c, Acot);
+      }
+    }
 
     std::vector<double> sumRow(numVertex, 0.0);
-
-    // Out of order cotanget sum
-    for (auto &tri : mesh.triangles) {
-      auto addTriplets = [&](unsigned a, unsigned b, double cot) {
-        sumRow[a] += cot;
-        sumRow[b] += cot;
-
-        if (!isBoundary[a])
-          triplets.emplace_back(a, b, cot);
-
-        if (!isBoundary[b])
-            triplets.emplace_back(b, a, cot);
-      };
-
-      vec3 A = mesh.coordinates[tri.a];
-      vec3 B = mesh.coordinates[tri.b];
-      vec3 C = mesh.coordinates[tri.c];
-
-      vec3 AB = A - B;
-      vec3 AC = A - C;
-      vec3 BC = B - C;
-
-      double Adot = AB.dot(AC);
-      double Bdot = (-AB).dot(BC);
-      double Cdot = (-AC).dot(-BC);
-
-      double Across = AB.cross(AC).module();
-      double Bcross = AB.cross(BC).module();
-      double Ccross = AC.cross(BC).module();
-
-      double Acot = Adot / Across;
-      double Bcot = Bdot / Bcross;
-      double Ccot = Cdot / Ccross;
-
-      addTriplets(tri.a, tri.b, Ccot);
-      addTriplets(tri.a, tri.c, Bcot);
-      addTriplets(tri.b, tri.c, Acot);
+    #pragma omp parallel for schedule(static)
+    for (std::size_t v = 0; v < numVertex; ++v) {
+      double s = 0.0;
+      for (int t = 0; t < nThreads; ++t) s += localSumRow[t][v];
+      sumRow[v] = s;
     }
 
-    // Initialize matrix
-    meshMatrix.setFromTriplets(triplets.begin(), triplets.end());
-    // VERY IMPORTANT!!! Reserve 8 edges per vertex, estimate of max
-    // connectivity, speeds up insertion a lot
-    meshMatrix.reserve(Eigen::VectorXi::Constant(numVertex, 8));
+    std::size_t totalTriplets = 0;
+    for (const auto &v : localTriplets) totalTriplets += v.size();
 
-    cout << "Done matrix init. "
-         << duration<float>(high_resolution_clock::now() - clock0).count()
-         << " seconds" << endl;
-
-    // Diagonal correction
-    for (size_t i = 0; i < numVertex; ++i) {
+    std::vector<Eigen::Triplet<double>> triplets;
+    triplets.reserve(totalTriplets + numVertex);
+    for (auto &v : localTriplets) {
+      triplets.insert(triplets.end(), v.begin(), v.end());
+      v.clear();
+      v.shrink_to_fit();
+    }
+    for (std::size_t i = 0; i < numVertex; ++i)
       if (!isBoundary[i])
-        meshMatrix.coeffRef(i, i) = -sumRow[i];
-    }
+        triplets.emplace_back(i, i, -sumRow[i]);
+
+
+    // build triplets
+    auto t1 = high_resolution_clock::now();
+    meshMatrix.setFromTriplets(triplets.begin(), triplets.end());
+    auto t2 = high_resolution_clock::now();
+    meshMatrix.reserve(Eigen::VectorXi::Constant(numVertex, 8));
+    auto t3 = high_resolution_clock::now();
+
+
+    cout << "triplets: " << duration<float>(t1 - t0).count() << "s\n"
+         << "setFromTriplets: " << duration<float>(t2 - t1).count() << "s\n"
+         << "reserve: " << duration<float>(t3 - t2).count() << "s\n";
 
     // END TODO 3.1
 
