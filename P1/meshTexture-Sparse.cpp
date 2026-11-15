@@ -510,9 +510,6 @@ int main(int argc, char *argv[]) {
     //       \/         .
     //
 
-    auto t0 = high_resolution_clock::now();
-
-
     std::vector<char> isBoundary(numVertex, 0);
     for (const auto &edge : externalEdges) {
       isBoundary[edge.a] = 1;
@@ -592,16 +589,8 @@ int main(int argc, char *argv[]) {
 
 
     // build triplets
-    auto t1 = high_resolution_clock::now();
     meshMatrix.setFromTriplets(triplets.begin(), triplets.end());
-    auto t2 = high_resolution_clock::now();
     meshMatrix.reserve(Eigen::VectorXi::Constant(numVertex, 8));
-    auto t3 = high_resolution_clock::now();
-
-
-    cout << "triplets: " << duration<float>(t1 - t0).count() << "s\n"
-         << "setFromTriplets: " << duration<float>(t2 - t1).count() << "s\n"
-         << "reserve: " << duration<float>(t3 - t2).count() << "s\n";
 
     // END TODO 3.1
 
