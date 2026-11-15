@@ -554,10 +554,10 @@ int main(int argc, char *argv[]) {
   try {
     // Set default input mesh filename
     // std::string filename("mallas/16Triangles.off");
-    // std::string filename("mallas/mannequin.ply");
+    // std::string filename("mallas/mannequin2.ply");
     // std::string filename("mallas/mask2.ply");
     // std::string filename("mallas/knot-hole.ply");
-    std::string filename("mallas/Nefertiti.990kv.ply");
+     std::string filename("mallas/Nefertiti.990kv.ply");
     // std::string filename("mallas/angel_kneeling.150kv.ply");
     // std::string filename("mallas/bunny.ply");
 
@@ -622,58 +622,15 @@ int main(int argc, char *argv[]) {
     // boundary (euclidean distance measured along edges) and store it in the
     // boundDist vector. Store in deepestVertex the index of the vertex with
     // the maximum distance to boundary
-    using Clock = std::chrono::high_resolution_clock;
-    using TP = Clock::time_point;
 
-    auto now = []() { return Clock::now(); };
-    auto us = [](TP a, TP b) -> double {
-      return std::chrono::duration_cast<
-                 std::chrono::duration<double, std::micro>>(b - a)
-          .count();
-    };
-
-    // -----------------------------------------------------------------------
-    TP t0 = now();
     const unsigned N = mesh.numVertex();
     boundDist.assign(N, INFINITY);
-    TP t1 = now();
 
-    // -----------------------------------------------------------------------
     CSRMatrix adj = getAdjMatrix(mesh, internalEdges);
-    TP t2 = now();
 
-    // -----------------------------------------------------------------------
     delta_stepping_mssp(adj, externalEdges, N, boundDist);
-    TP t3 = now();
 
-    // -----------------------------------------------------------------------
     float maxDist = findMax(deepestVertex, boundDist);
-    TP t4 = now();
-
-    // -----------------------------------------------------------------------
-    const double t_init = us(t0, t1);
-    const double t_adj = us(t1, t2);
-    const double t_sssp = us(t2, t3);
-    const double t_max = us(t3, t4);
-    const double t_total = t_init + t_adj + t_sssp + t_max;
-
-    auto pct = [t_total](double v) { return 100.0 * v / t_total; };
-
-    std::cout << "\n=== Profiling meshBoundary ===\n";
-    std::cout << "  N vertex         : " << N << "\n";
-    std::cout << "  threads          : " << omp_get_max_threads() << "\n";
-    std::cout << "  ------------------------------------------------\n";
-    std::cout << "  init dist        : " << t_init << " us  (" << pct(t_init)
-              << " %)\n";
-    std::cout << "  getAdjMatrix     : " << t_adj << " us  (" << pct(t_adj)
-              << " %)\n";
-    std::cout << "  delta-stepping   : " << t_sssp << " us  (" << pct(t_sssp)
-              << " %)\n";
-    std::cout << "  findMax          : " << t_max << " us  (" << pct(t_max)
-              << " %)\n";
-    std::cout << "  ------------------------------------------------\n";
-    std::cout << "  TOTAL            : " << t_total << " us\n";
-    std::cout << std::flush;
 
     if (maxDist == INFINITY) {
       cout << "meshBoundary IMPOSIBLE: No frontier found, fatal error" << endl;

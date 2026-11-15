@@ -312,7 +312,6 @@ int main(int argc, char *argv[]) {
     string cmd = viewcmd + " " + outputFilename;
     cout << "Executing external command: " << cmd << endl;
 
-    return 0;
     return system(cmd.c_str());
 
     // END TODO 1.3

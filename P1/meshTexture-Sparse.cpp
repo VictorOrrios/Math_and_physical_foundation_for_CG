@@ -673,8 +673,8 @@ int main(int argc, char *argv[]) {
         cout << "Negative UVs at frontier vertex " << edge.a << " UV " << u
              << "," << v << endl;
       }
-      UV_0.coeffRef(edge.a, 0) = u;
-      UV_0.coeffRef(edge.b, 1) = v;
+      UV_0.coeffRef(edge.a, 0) = v;
+      UV_0.coeffRef(edge.b, 1) = u;
     }
 
     // END TODO 3.3
