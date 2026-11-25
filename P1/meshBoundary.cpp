@@ -176,6 +176,7 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
     }
 
     // 3. Sort + Mark + Count. One pass
+    std::size_t threadMarkEnd;
     {
       std::size_t it = skipStart;
       uint32_t localExt = 0;
@@ -219,6 +220,7 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
 
       // Record counts, compute internal count using total visited - external
       // marked
+      threadMarkEnd = it;
       intExtCounts[tid][0] = (it - skipStart - localExt) / 2;
       intExtCounts[tid][1] = localExt;
     }
@@ -252,7 +254,7 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
       uint32_t intOff = intExtCounts[tid][0];
 
       // Use bit flag to now next edge to visit
-      while (it < end) {
+      while (it < threadMarkEnd) {
         if (edges[it] & UNIQUE_EDGE_BIT_MASK) {
           externalEdges[extOff++] = bitToEdge(edges[it]);
           it++;
@@ -553,11 +555,11 @@ void updateEdgeLists(const SimpleMesh &mesh,
 int main(int argc, char *argv[]) {
   try {
     // Set default input mesh filename
-    // std::string filename("mallas/16Triangles.off");
+    std::string filename("mallas/16Triangles.off");
     // std::string filename("mallas/mannequin2.ply");
     // std::string filename("mallas/mask2.ply");
     // std::string filename("mallas/knot-hole.ply");
-    std::string filename("mallas/Nefertiti.990kv.ply");
+    // std::string filename("mallas/Nefertiti.990kv.ply");
     // std::string filename("mallas/angel_kneeling.150kv.ply");
     // std::string filename("mallas/bunny.ply");
 
