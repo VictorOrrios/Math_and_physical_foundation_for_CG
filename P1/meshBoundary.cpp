@@ -265,6 +265,71 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
   }
 }
 
+void orderExternalEdgesIntoLoops(const SimpleMesh &mesh,
+                                 std::vector<SimpleEdge> &externalEdges) {
+  if (externalEdges.empty())
+    return;
+
+  struct Hash {
+    std::size_t n;
+    std::size_t operator()(const SimpleEdge &e) const {
+      return std::min(e.a, e.b) + std::max(e.a, e.b) * n;
+    }
+  };
+  struct Eq {
+    bool operator()(const SimpleEdge &x, const SimpleEdge &y) const {
+      return (x.a == y.a && x.b == y.b) || (x.a == y.b && x.b == y.a);
+    }
+  };
+  const Hash hash{mesh.numVertex()};
+  const Eq eq{};
+
+  // Boundary edges (unordered) to test membership from triangles.
+  std::unordered_set<SimpleEdge, Hash, Eq> boundary(0, hash, eq);
+  boundary.reserve(externalEdges.size());
+  for (auto &e : externalEdges)
+    boundary.insert(e);
+
+  // Recover winding from triangles + build directed next map a -> b.
+  std::unordered_map<unsigned, unsigned> edgeMap;
+  edgeMap.reserve(boundary.size());
+  for (const auto &tri : mesh.triangles)
+    for (const auto &e : tri.edges())
+      if (boundary.count(e))
+        edgeMap[e.a] = e.b;
+
+  // Lexicographic (X, Y, Z) comparison; strict < so ties keep the first seen.
+  auto less3 = [](const vec3 &a, const vec3 &b) {
+    return a.X < b.X ||
+           (a.X == b.X && (a.Y < b.Y || (a.Y == b.Y && a.Z < b.Z)));
+  };
+
+  externalEdges.clear();
+  externalEdges.reserve(edgeMap.size());
+
+  unsigned curr = static_cast<unsigned>(-1);
+  vec3 minPos(INFINITY, INFINITY, INFINITY);
+
+  while (!edgeMap.empty()) {
+    if (edgeMap.find(curr) == edgeMap.end()) {
+      // Start of a new loop: pick the minimum (X,Y,Z) among the remaining
+      // vertices
+      minPos = vec3(INFINITY, INFINITY, INFINITY);
+      for (const auto &kv : edgeMap) {
+        const vec3 &p = mesh.coordinates[kv.first];
+        if (less3(p, minPos)) {
+          minPos = p;
+          curr = kv.first;
+        }
+      }
+    }
+    const unsigned next = edgeMap.at(curr);
+    externalEdges.push_back(SimpleEdge(curr, next));
+    edgeMap.erase(curr);
+    curr = next;
+  }
+}
+
 CSRMatrix getAdjMatrix(SimpleMesh &mesh,
                        std::vector<SimpleEdge> &internalEdges) {
   const unsigned N = mesh.numVertex();
@@ -480,73 +545,8 @@ void updateEdgeLists(const SimpleMesh &mesh,
   // Radix sort
   sortAndClassifyEdges(edges, externalEdges, internalEdges);
 
-  // Find the smallest vertex on the boundary.
-  vec3 minPos(INFINITY, INFINITY, INFINITY);
-  unsigned minVertex = static_cast<unsigned>(-1);
-
-  auto updateMin = [&](unsigned v) {
-    const vec3 &pos = mesh.coordinates[v];
-
-    if ((pos.X < minPos.X) || (pos.X == minPos.X && pos.Y < minPos.Y) ||
-        (pos.X == minPos.X && pos.Y == minPos.Y && pos.Z < minPos.Z)) {
-      minPos = pos;
-      minVertex = v;
-    }
-  };
-
-  auto eraseOne = [](std::vector<unsigned> &vec, unsigned value) {
-    auto it = std::find(vec.begin(), vec.end(), value);
-    if (it != vec.end())
-      vec.erase(it);
-  };
-
-  // Build the boundary edge map.
-  std::unordered_map<unsigned, std::vector<unsigned>> edgeMap(
-      externalEdges.size());
-
-  for (const auto &exEdge : externalEdges) {
-    edgeMap[exEdge.a].push_back(exEdge.b);
-    edgeMap[exEdge.b].push_back(exEdge.a);
-    updateMin(exEdge.a);
-    updateMin(exEdge.b);
-  }
-
-  // Order external edges into boundary loops.
-  unsigned currVertex = minVertex;
-  for (std::size_t i = 0; i < externalEdges.size(); i++) {
-    auto itCur = edgeMap.find(currVertex);
-
-    if (itCur == edgeMap.end() || itCur->second.empty()) {
-      // New loop, find new minimum
-      minPos = vec3(INFINITY, INFINITY, INFINITY);
-
-      bool found = false;
-      for (const auto &entry : edgeMap) {
-        if (!entry.second.empty()) {
-          updateMin(entry.first);
-          found = true;
-        }
-      }
-      if (!found)
-        break; // Just in case
-
-      currVertex = minVertex;
-      itCur = edgeMap.find(currVertex);
-    }
-
-    // Get next vertex.
-    unsigned next = itCur->second.back();
-    itCur->second.pop_back();
-
-    // Remove the reverse edge from next.
-    auto itNext = edgeMap.find(next);
-    if (itNext != edgeMap.end())
-      eraseOne(itNext->second, currVertex);
-
-    // Save current edge
-    externalEdges[i] = SimpleEdge(currVertex, next);
-    currVertex = next;
-  }
+  // Create loop
+  orderExternalEdgesIntoLoops(mesh, externalEdges);
   // END TODO 2.1
 }
 
@@ -557,7 +557,7 @@ int main(int argc, char *argv[]) {
     // std::string filename("mallas/mannequin2.ply");
     // std::string filename("mallas/mask2.ply");
     // std::string filename("mallas/knot-hole.ply");
-     std::string filename("mallas/Nefertiti.990kv.ply");
+    std::string filename("mallas/Nefertiti.990kv.ply");
     // std::string filename("mallas/angel_kneeling.150kv.ply");
     // std::string filename("mallas/bunny.ply");
 

@@ -261,6 +261,71 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
   }
 }
 
+void orderExternalEdgesIntoLoops(const SimpleMesh &mesh,
+                                 std::vector<SimpleEdge> &externalEdges) {
+  if (externalEdges.empty())
+    return;
+
+  struct Hash {
+    std::size_t n;
+    std::size_t operator()(const SimpleEdge &e) const {
+      return std::min(e.a, e.b) + std::max(e.a, e.b) * n;
+    }
+  };
+  struct Eq {
+    bool operator()(const SimpleEdge &x, const SimpleEdge &y) const {
+      return (x.a == y.a && x.b == y.b) || (x.a == y.b && x.b == y.a);
+    }
+  };
+  const Hash hash{mesh.numVertex()};
+  const Eq eq{};
+
+  // Boundary edges (unordered) to test membership from triangles.
+  std::unordered_set<SimpleEdge, Hash, Eq> boundary(0, hash, eq);
+  boundary.reserve(externalEdges.size());
+  for (auto &e : externalEdges)
+    boundary.insert(e);
+
+  // Recover winding from triangles + build directed next map a -> b.
+  std::unordered_map<unsigned, unsigned> edgeMap;
+  edgeMap.reserve(boundary.size());
+  for (const auto &tri : mesh.triangles)
+    for (const auto &e : tri.edges())
+      if (boundary.count(e))
+        edgeMap[e.a] = e.b;
+
+  // Lexicographic (X, Y, Z) comparison; strict < so ties keep the first seen.
+  auto less3 = [](const vec3 &a, const vec3 &b) {
+    return a.X < b.X ||
+           (a.X == b.X && (a.Y < b.Y || (a.Y == b.Y && a.Z < b.Z)));
+  };
+
+  externalEdges.clear();
+  externalEdges.reserve(edgeMap.size());
+
+  unsigned curr = static_cast<unsigned>(-1);
+  vec3 minPos(INFINITY, INFINITY, INFINITY);
+
+  while (!edgeMap.empty()) {
+    if (edgeMap.find(curr) == edgeMap.end()) {
+      // Start of a new loop: pick the minimum (X,Y,Z) among the remaining
+      // vertices
+      minPos = vec3(INFINITY, INFINITY, INFINITY);
+      for (const auto &kv : edgeMap) {
+        const vec3 &p = mesh.coordinates[kv.first];
+        if (less3(p, minPos)) {
+          minPos = p;
+          curr = kv.first;
+        }
+      }
+    }
+    const unsigned next = edgeMap.at(curr);
+    externalEdges.push_back(SimpleEdge(curr, next));
+    edgeMap.erase(curr);
+    curr = next;
+  }
+}
+
 /// Write an Eigen Matrix to a matlab file
 void exportDenseToMatlab(const Eigen::MatrixXd &m, const std::string &filename,
                          const std::string matrixName = "A") {
@@ -343,73 +408,9 @@ void updateEdgeLists(const SimpleMesh &mesh,
   // Radix sort
   sortAndClassifyEdges(edges, externalEdges, internalEdges);
 
-  // Find the smallest vertex on the boundary.
-  vec3 minPos(INFINITY, INFINITY, INFINITY);
-  unsigned minVertex = static_cast<unsigned>(-1);
+  // Create loops
+  orderExternalEdgesIntoLoops(mesh, externalEdges);
 
-  auto updateMin = [&](unsigned v) {
-    const vec3 &pos = mesh.coordinates[v];
-
-    if ((pos.X < minPos.X) || (pos.X == minPos.X && pos.Y < minPos.Y) ||
-        (pos.X == minPos.X && pos.Y == minPos.Y && pos.Z < minPos.Z)) {
-      minPos = pos;
-      minVertex = v;
-    }
-  };
-
-  auto eraseOne = [](std::vector<unsigned> &vec, unsigned value) {
-    auto it = std::find(vec.begin(), vec.end(), value);
-    if (it != vec.end())
-      vec.erase(it);
-  };
-
-  // Build the boundary edge map.
-  std::unordered_map<unsigned, std::vector<unsigned>> edgeMap(
-      externalEdges.size());
-
-  for (const auto &exEdge : externalEdges) {
-    edgeMap[exEdge.a].push_back(exEdge.b);
-    edgeMap[exEdge.b].push_back(exEdge.a);
-    updateMin(exEdge.a);
-    updateMin(exEdge.b);
-  }
-
-  // Order external edges into boundary loops.
-  unsigned currVertex = minVertex;
-  for (std::size_t i = 0; i < externalEdges.size(); i++) {
-    auto itCur = edgeMap.find(currVertex);
-
-    if (itCur == edgeMap.end() || itCur->second.empty()) {
-      // New loop, find new minimum
-      minPos = vec3(INFINITY, INFINITY, INFINITY);
-
-      bool found = false;
-      for (const auto &entry : edgeMap) {
-        if (!entry.second.empty()) {
-          updateMin(entry.first);
-          found = true;
-        }
-      }
-      if (!found)
-        break; // Just in case
-
-      currVertex = minVertex;
-      itCur = edgeMap.find(currVertex);
-    }
-
-    // Get next vertex.
-    unsigned next = itCur->second.back();
-    itCur->second.pop_back();
-
-    // Remove the reverse edge from next.
-    auto itNext = edgeMap.find(next);
-    if (itNext != edgeMap.end())
-      eraseOne(itNext->second, currVertex);
-
-    // Save current edge
-    externalEdges[i] = SimpleEdge(currVertex, next);
-    currVertex = next;
-  }
   // END TODO 2.1
 } // void updateEdgeLists()
 
@@ -420,7 +421,7 @@ int main(int argc, char *argv[]) {
 
   try {
     // Set default input mesh filename
-    // std::string filename("mallas/16Triangles.off");  //Minimal case test
+    // std::string filename("mallas/16Triangles.off"); // Minimal case test
     // std::string filename("mallas/mask2.ply"); // Easy case test
     // std::string filename("mallas/mannequin2.ply"); //Medium case test
     // std::string filename("mallas/laurana50k.ply"); //Really hard for dense
@@ -526,13 +527,13 @@ int main(int argc, char *argv[]) {
     for (int t = 0; t < nThreads; ++t)
       localTriplets[t].reserve((numTri / nThreads + 1) * 6);
 
-    #pragma omp parallel
+#pragma omp parallel
     {
       const int tId = omp_get_thread_num();
       auto &myTriplets = localTriplets[tId];
       auto &mySumRow = localSumRow[tId];
 
-      #pragma omp for schedule(static)
+#pragma omp for schedule(static)
       for (std::size_t i = 0; i < numTri; ++i) {
         const auto &tri = mesh.triangles[i];
 
@@ -556,8 +557,10 @@ int main(int argc, char *argv[]) {
         auto addTriplets = [&](unsigned a, unsigned b, double cot) {
           mySumRow[a] += cot;
           mySumRow[b] += cot;
-          if (!isBoundary[a]) myTriplets.emplace_back(a, b, cot);
-          if (!isBoundary[b]) myTriplets.emplace_back(b, a, cot);
+          if (!isBoundary[a])
+            myTriplets.emplace_back(a, b, cot);
+          if (!isBoundary[b])
+            myTriplets.emplace_back(b, a, cot);
         };
         addTriplets(tri.a, tri.b, Ccot);
         addTriplets(tri.a, tri.c, Bcot);
@@ -566,15 +569,17 @@ int main(int argc, char *argv[]) {
     }
 
     std::vector<double> sumRow(numVertex, 0.0);
-    #pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static)
     for (std::size_t v = 0; v < numVertex; ++v) {
       double s = 0.0;
-      for (int t = 0; t < nThreads; ++t) s += localSumRow[t][v];
+      for (int t = 0; t < nThreads; ++t)
+        s += localSumRow[t][v];
       sumRow[v] = s;
     }
 
     std::size_t totalTriplets = 0;
-    for (const auto &v : localTriplets) totalTriplets += v.size();
+    for (const auto &v : localTriplets)
+      totalTriplets += v.size();
 
     std::vector<Eigen::Triplet<double>> triplets;
     triplets.reserve(totalTriplets + numVertex);
@@ -586,7 +591,6 @@ int main(int argc, char *argv[]) {
     for (std::size_t i = 0; i < numVertex; ++i)
       if (!isBoundary[i])
         triplets.emplace_back(i, i, -sumRow[i]);
-
 
     // build triplets
     meshMatrix.setFromTriplets(triplets.begin(), triplets.end());
@@ -612,7 +616,7 @@ int main(int argc, char *argv[]) {
     for (auto &edge : externalEdges) {
       meshMatrix.coeffRef(edge.a, edge.a) = 1;
     }
-    //meshMatrix.prune(0.0);
+    // meshMatrix.prune(0.0);
     meshMatrix.makeCompressed();
 
     // END TODO 3.2
@@ -673,8 +677,8 @@ int main(int argc, char *argv[]) {
         cout << "Negative UVs at frontier vertex " << edge.a << " UV " << u
              << "," << v << endl;
       }
-      UV_0.coeffRef(edge.a, 0) = v;
-      UV_0.coeffRef(edge.b, 1) = u;
+      UV_0.coeffRef(edge.a, 0) = u;
+      UV_0.coeffRef(edge.b, 1) = v;
     }
 
     // END TODO 3.3
@@ -698,7 +702,7 @@ int main(int argc, char *argv[]) {
     // Check http://eigen.tuxfamily.org/dox/group__TopicSparseSystems.html
 
     Eigen::SparseLU<Eigen::SparseMatrix<double>> solver;
-    //Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
+    // Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver;
 
     solver.compute(meshMatrix);
 
