@@ -52,15 +52,29 @@ using Eigen::SparseMatrix;
 #include <atomic>
 #include <omp.h>
 
+constexpr uint64_t UNIQUE_EDGE_BIT = 1ULL << 63;
+constexpr uint64_t FORWARD_BIT = 1ULL << 62;
+constexpr uint64_t KEY_MASK = (1ULL << 44) - 1;
+constexpr uint64_t LO_MASK = 0x3FFFFF;
+auto loOf = [](uint64_t v) { return (v >> 22) & LO_MASK; };
+
 // Mesh with the most vertex is Venus3000 with 1.5M vertex
 // 22 bits to store an index => 44 bits per edge => 11bit radix sort is optimal
+// Added a forward bit to keep in memory original edge orientation
 inline uint64_t edge64bit(uint32_t a, uint32_t b) {
-  return a < b ? (uint64_t(a) << 22) | b : (uint64_t(b) << 22) | a;
+  const bool forward = a < b;
+  const uint32_t lo = forward ? a : b;
+  const uint32_t hi = forward ? b : a;
+  return (uint64_t(lo) << 22) | uint64_t(hi) | (forward ? FORWARD_BIT : 0ULL);
 }
 
+// Use forward bit to keep original edge orientation
 inline SimpleEdge bitToEdge(uint64_t bits) {
-  bits &= 0x7FFFFFFFFFFFULL; // Clean unique edge bit flag
-  return SimpleEdge(bits >> 22, bits & 0x3FFFFF);
+  const bool forward = bits & FORWARD_BIT;
+  bits &= KEY_MASK;
+  const uint32_t lo = loOf(bits);
+  const uint32_t hi = bits & LO_MASK;
+  return forward ? SimpleEdge(lo, hi) : SimpleEdge(hi, lo);
 }
 
 inline void parallelRadixSort11bit(std::vector<uint64_t> &data, int startBit,
@@ -145,10 +159,6 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
   // 1. Radix sort by bits 22 to 43 (lower index in an edge)
   parallelRadixSort11bit(edges, 22, 2);
 
-  // Unique edge bit flag
-  // Used instead of bool/bit vector for less memory and better cache
-  constexpr uint64_t UNIQUE_EDGE_BIT_MASK = 0x8000000000000000ULL;
-
   const int maxThreads = omp_get_max_threads();
 
   // Count to resize output vectors. [0] = internal [1] = external
@@ -164,10 +174,9 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
 
     // 2. Skip first group in thread block range
     std::size_t skipStart = begin;
-    if (skipStart > 0 &&
-        (edges[skipStart] >> 22) == (edges[skipStart - 1] >> 22)) {
-      const uint64_t a = edges[skipStart] >> 22;
-      while (skipStart < end && (edges[skipStart] >> 22) == a)
+    if (skipStart > 0 && loOf(edges[skipStart]) == loOf(edges[skipStart - 1])) {
+      const uint64_t a = loOf(edges[skipStart]);
+      while (skipStart < end && loOf(edges[skipStart]) == a)
         skipStart++;
     }
 
@@ -179,9 +188,9 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
 
       while (it < end) {
         // 3.a. Get edge group range
-        const uint64_t a = edges[it] >> 22;
+        const uint64_t a = loOf(edges[it]);
         std::size_t gEnd = it + 1;
-        while (gEnd < n && (edges[gEnd] >> 22) == a)
+        while (gEnd < n && loOf(edges[gEnd]) == a)
           gEnd++;
 
         // 3.b. Insertion sort the lower 22 bit
@@ -190,8 +199,9 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
         // w/o bitwise AND is optimal
         for (std::size_t k = it + 1; k < gEnd; k++) {
           const uint64_t v = edges[k];
+          const uint64_t vKey = v & KEY_MASK;
           std::size_t j = k;
-          while (j > it && edges[j - 1] > v) {
+          while (j > it && (edges[j - 1] & KEY_MASK) > vKey) {
             edges[j] = edges[j - 1];
             j--;
           }
@@ -202,10 +212,11 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
         // marked
         std::size_t p = it;
         while (p < gEnd) {
-          if (p + 1 < gEnd && edges[p] == edges[p + 1]) {
-            p += 2;
+          if (p + 1 < gEnd &&
+              (edges[p] & KEY_MASK) == (edges[p + 1] & KEY_MASK)) {
+            p += 2; // arista interior: se consume el par
           } else {
-            edges[p] |= UNIQUE_EDGE_BIT_MASK;
+            edges[p] |= UNIQUE_EDGE_BIT;
             localExt++;
             p++;
           }
@@ -251,7 +262,7 @@ void sortAndClassifyEdges(std::vector<uint64_t> &edges,
 
       // Use bit flag to now next edge to visit
       while (it < threadMarkEnd) {
-        if (edges[it] & UNIQUE_EDGE_BIT_MASK) {
+        if (edges[it] & UNIQUE_EDGE_BIT) {
           externalEdges[extOff++] = bitToEdge(edges[it]);
           it++;
         } else {
@@ -267,64 +278,74 @@ void orderExternalEdgesIntoLoops(const SimpleMesh &mesh,
                                  std::vector<SimpleEdge> &externalEdges) {
   if (externalEdges.empty())
     return;
+  const unsigned NV = mesh.numVertex();
+  const std::size_t B = externalEdges.size();
+  const auto &coords = mesh.coordinates;
 
-  struct Hash {
-    std::size_t n;
-    std::size_t operator()(const SimpleEdge &e) const {
-      return std::min(e.a, e.b) + std::max(e.a, e.b) * n;
-    }
-  };
-  struct Eq {
-    bool operator()(const SimpleEdge &x, const SimpleEdge &y) const {
-      return (x.a == y.a && x.b == y.b) || (x.a == y.b && x.b == y.a);
-    }
-  };
-  const Hash hash{mesh.numVertex()};
-  const Eq eq{};
-
-  // Boundary edges (unordered) to test membership from triangles.
-  std::unordered_set<SimpleEdge, Hash, Eq> boundary(0, hash, eq);
-  boundary.reserve(externalEdges.size());
-  for (auto &e : externalEdges)
-    boundary.insert(e);
-
-  // Recover winding from triangles + build directed next map a -> b.
-  std::unordered_map<unsigned, unsigned> edgeMap;
-  edgeMap.reserve(boundary.size());
-  for (const auto &tri : mesh.triangles)
-    for (const auto &e : tri.edges())
-      if (boundary.count(e))
-        edgeMap[e.a] = e.b;
-
-  // Lexicographic (X, Y, Z) comparison; strict < so ties keep the first seen.
-  auto less3 = [](const vec3 &a, const vec3 &b) {
-    return a.X < b.X ||
-           (a.X == b.X && (a.Y < b.Y || (a.Y == b.Y && a.Z < b.Z)));
+  // Ordered by X -> Y -> Z -> id
+  auto lessV = [&coords](unsigned a, unsigned b) {
+    const vec3 &pa = coords[a], &pb = coords[b];
+    if (pa.X != pb.X)
+      return pa.X < pb.X;
+    if (pa.Y != pb.Y)
+      return pa.Y < pb.Y;
+    if (pa.Z != pb.Z)
+      return pa.Z < pb.Z;
+    return a < b;
   };
 
-  externalEdges.clear();
-  externalEdges.reserve(edgeMap.size());
+  // Bit 31 = visited. Indices fit in 22 bits, so upper bits are free.
+  constexpr unsigned VISITED = 0x80000000u;
+  constexpr unsigned IDX_MASK = 0x7FFFFFFFu;
 
-  unsigned curr = static_cast<unsigned>(-1);
-  vec3 minPos(INFINITY, INFINITY, INFINITY);
+  // 1. Fill next vertex vector
+  std::vector<unsigned> nextV(NV);
+#pragma omp parallel for schedule(static)
+  for (const auto &e : externalEdges)
+    nextV[e.a] = e.b;
 
-  while (!edgeMap.empty()) {
-    if (edgeMap.find(curr) == edgeMap.end()) {
-      // Start of a new loop: pick the minimum (X,Y,Z) among the remaining
-      // vertices
-      minPos = vec3(INFINITY, INFINITY, INFINITY);
-      for (const auto &kv : edgeMap) {
-        const vec3 &p = mesh.coordinates[kv.first];
-        if (less3(p, minPos)) {
-          minPos = p;
-          curr = kv.first;
-        }
-      }
-    }
-    const unsigned next = edgeMap.at(curr);
-    externalEdges.push_back(SimpleEdge(curr, next));
-    edgeMap.erase(curr);
-    curr = next;
+  // 2. Walk each loop exactly once: record min and length.
+  std::vector<unsigned> loopMin;
+  std::vector<unsigned> loopLen;
+  loopMin.reserve(B / 4 + 1);
+  loopLen.reserve(B / 4 + 1);
+
+  for (const auto &e : externalEdges) {
+    const unsigned s = e.a;
+    if (nextV[s] & VISITED)
+      continue;
+    unsigned minV = s, u = s, len = 0;
+    do {
+      nextV[u] |= VISITED;
+      if (lessV(u, minV))
+        minV = u;
+      u = nextV[u] & IDX_MASK;
+      len++;
+    } while (u != s);
+    loopMin.push_back(minV);
+    loopLen.push_back(len);
+  }
+
+  // 3. Prefix sum on loop length
+  const std::size_t L = loopMin.size();
+  std::vector<std::size_t> loopOff(L);
+  std::size_t acc = 0;
+  for (std::size_t i = 0; i < L; ++i) {
+    loopOff[i] = acc;
+    acc += loopLen[i];
+  }
+
+  // 4. Reorder loop in parallel
+#pragma omp parallel for schedule(static)
+  for (std::size_t l = 0; l < L; ++l) {
+    const unsigned start = loopMin[l];
+    unsigned u = start;
+    std::size_t pos = loopOff[l];
+    do {
+      const unsigned nx = nextV[u] & IDX_MASK;
+      externalEdges[pos++] = SimpleEdge{u, nx};
+      u = nx;
+    } while (u != start);
   }
 }
 
