@@ -563,19 +563,12 @@ void updateEdgeLists(const SimpleMesh &mesh,
     edges[j + 1] = edge64bit(tri.b, tri.c);
     edges[j + 2] = edge64bit(tri.c, tri.a);
   }
-  high_resolution_clock::time_point clock0 = high_resolution_clock::now();
 
   // Radix sort
   sortAndClassifyEdges(edges, externalEdges, internalEdges);
-  cout << "====== Done  sortAndClassifyEdges"
-       << duration<float>(high_resolution_clock::now() - clock0).count()
-       << " seconds" << endl;
 
   // Create loop
   orderExternalEdgesIntoLoops(mesh, externalEdges);
-  cout << "====== Done  orderExternalEdgesIntoLoops"
-       << duration<float>(high_resolution_clock::now() - clock0).count()
-       << " seconds" << endl;
   // END TODO 2.1
 }
 
@@ -586,8 +579,8 @@ int main(int argc, char *argv[]) {
     // std::string filename("mallas/mannequin2.ply");
     // std::string filename("mallas/mask2.ply");
     // std::string filename("mallas/knot-hole.ply");
-    std::string filename("mallas/Nefertiti.990kv.ply");
-    // std::string filename("mallas/angel_kneeling.150kv.ply");
+    // std::string filename("mallas/Nefertiti.990kv.ply");
+    std::string filename("mallas/angel_kneeling.150kv.ply");
     // std::string filename("mallas/bunny.ply");
 
     if (argc > 1)

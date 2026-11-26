@@ -445,11 +445,11 @@ int main(int argc, char *argv[]) {
   try {
     // Set default input mesh filename
     // std::string filename("mallas/16Triangles.off"); // Minimal case test
-    // std::string filename("mallas/mask2.ply"); // Easy case test
+    std::string filename("mallas/mask2.ply"); // Easy case test
     // std::string filename("mallas/mannequin2.ply"); //Medium case test
     // std::string filename("mallas/laurana50k.ply"); //Really hard for dense
     // std::string filename("mallas/MaxPlanck.45kv.ply");
-    std::string filename("mallas/Nefertiti.990kv.ply");
+    // std::string filename("mallas/Nefertiti.990kv.ply");
     if (argc > 1)
       filename = std::string(argv[1]);
 
